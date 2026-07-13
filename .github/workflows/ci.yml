@@ -9,9 +9,16 @@ jobs:
   test:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-        with:
-          show-progress: false
+      - name: Checkout
+        env:
+          REPOSITORY: ${{ github.repository }}
+          HEAD_BRANCH: ${{ github.head_ref }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          BRANCH="${HEAD_BRANCH:-$REF_NAME}"
+          git clone -q --depth 1 --branch "$BRANCH" "https://github.com/$REPOSITORY.git" source
+          cp -a source/. .
+          rm -rf source .git
       - name: Create environment
         run: |
           python3 -m venv .venv
