@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import create_engine, insert, select, update
@@ -26,6 +27,10 @@ def get_engine() -> Engine:
     }
     if cfg.database_url.startswith("postgresql"):
         kwargs["connect_args"] = {"connect_timeout": 15}
+    elif cfg.database_url.startswith("sqlite:///"):
+        sqlite_path = cfg.database_url.removeprefix("sqlite:///")
+        if sqlite_path and sqlite_path != ":memory:":
+            Path(sqlite_path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
     engine = create_engine(cfg.database_url, **kwargs)
     return engine
 
