@@ -44,26 +44,23 @@ def list_review_tasks(reviewer: str, limit: int = 50) -> list[dict[str, Any]]:
         rows = conn.execute(select(review_tasks).where(review_tasks.c.status == "open").order_by(review_tasks.c.priority.desc(), review_tasks.c.created_at, review_tasks.c.id).limit(max(100, limit * 3))).all()
     result = []
     for row in rows:
-        if int(row.id) in reviewed:
-            continue
+        if int(row.id) in reviewed: continue
         item = dict(row._mapping); item["payload"] = json.loads(item.pop("payload_json") or "{}"); result.append(item)
-        if len(result) >= limit:
-            break
+        if len(result) >= limit: break
     return result
 
 
 def knowledge_rows(limit: int | None = None) -> list[dict[str, Any]]:
-    query = select(addresses.c.id.label("address_id"), addresses.c.address_key, addresses.c.locality, addresses.c.district, addresses.c.settlement, addresses.c.street, addresses.c.locality_key, addresses.c.district_key, addresses.c.settlement_key, addresses.c.street_key, address_mappings.c.id.label("mapping_id"), address_mappings.c.res_name, address_mappings.c.branch_name, address_mappings.c.status, address_mappings.c.source_confidence, address_mappings.c.human_confirmations).select_from(addresses.join(address_mappings, addresses.c.id == address_mappings.c.address_id)).where(address_mappings.c.active.is_(True)).order_by(address_mappings.c.branch_name, address_mappings.c.res_name, addresses.c.locality)
-    if limit:
-        query = query.limit(limit)
-    with get_engine().connect() as conn:
-        return [dict(row._mapping) for row in conn.execute(query)]
+    query = select(addresses.c.id.label("address_id"), addresses.c.address_key, addresses.c.locality, addresses.c.district, addresses.c.settlement, addresses.c.street, addresses.c.locality_key, addresses.c.district_key, addresses.c.settlement_key, addresses.c.street_key, address_mappings.c.id.label("mapping_id"), address_mappings.c.res_name, address_mappings.c.branch_name, address_mappings.c.status, address_mappings.c.source_confidence, address_mappings.c.human_confirmations, address_mappings.c.active).select_from(addresses.join(address_mappings, addresses.c.id == address_mappings.c.address_id)).where(address_mappings.c.active.is_(True)).order_by(address_mappings.c.branch_name, address_mappings.c.res_name, addresses.c.locality)
+    if limit: query = query.limit(limit)
+    with get_engine().connect() as conn: return [dict(row._mapping) for row in conn.execute(query)]
 
 
 def stats() -> dict[str, int]:
     initialize_database()
     with get_engine().connect() as conn:
-        count = lambda table, *where: int(conn.scalar(select(func.count()).select_from(table).where(*where)) or 0)
+        def count(table, *where):
+            return int(conn.scalar(select(func.count()).select_from(table).where(*where)) or 0)
         return {"addresses": count(addresses), "mappings": count(address_mappings, address_mappings.c.active.is_(True)), "open_tasks": count(review_tasks, review_tasks.c.status == "open"), "conflicts": count(review_tasks, review_tasks.c.status == "open", review_tasks.c.task_type == "mapping_conflict"), "human_verified": count(address_mappings, address_mappings.c.active.is_(True), address_mappings.c.status == "human_verified"), "text_examples": count(text_examples), "source_files": count(source_files)}
 
 
@@ -74,8 +71,7 @@ def increment_human_decisions() -> int:
 def save_query_rule(raw_query: str, selection: list[dict[str, Any]], actor: str) -> None:
     normalized, now, encoded = normalize_text(raw_query), utcnow(), stable_json(selection)
     with get_engine().begin() as conn:
-        row = conn.execute(select(query_rules.c.id).where(query_rules.c.normalized_query == normalized)).first()
-        values = dict(raw_query=raw_query, selection_json=encoded, created_by=actor, updated_at=now)
+        row = conn.execute(select(query_rules.c.id).where(query_rules.c.normalized_query == normalized)).first(); values = dict(raw_query=raw_query, selection_json=encoded, created_by=actor, updated_at=now)
         if row: conn.execute(update(query_rules).where(query_rules.c.id == row.id).values(**values))
         else: conn.execute(insert(query_rules).values(normalized_query=normalized, created_at=now, **values))
 
@@ -96,7 +92,7 @@ def recent_audit(limit: int = 200) -> list[dict[str, Any]]:
 
 
 def browse_knowledge(search_text: str = "", status: str = "", branch: str = "", res_name: str = "", limit: int = 500) -> list[dict[str, Any]]:
-    query = select(address_mappings.c.id.label("mapping_id"), address_mappings.c.branch_name, address_mappings.c.res_name, addresses.c.locality, addresses.c.district, addresses.c.settlement, addresses.c.street, address_mappings.c.status, address_mappings.c.source_confidence, address_mappings.c.human_confirmations).select_from(addresses.join(address_mappings, addresses.c.id == address_mappings.c.address_id)).where(address_mappings.c.active.is_(True)).order_by(address_mappings.c.branch_name, address_mappings.c.res_name, addresses.c.locality).limit(limit)
+    query = select(address_mappings.c.id.label("mapping_id"), address_mappings.c.branch_name, address_mappings.c.res_name, addresses.c.locality, addresses.c.district, addresses.c.settlement, addresses.c.street, address_mappings.c.status, address_mappings.c.source_confidence, address_mappings.c.human_confirmations, address_mappings.c.active).select_from(addresses.join(address_mappings, addresses.c.id == address_mappings.c.address_id)).where(address_mappings.c.active.is_(True)).order_by(address_mappings.c.branch_name, address_mappings.c.res_name, addresses.c.locality).limit(limit)
     conditions = []
     if status: conditions.append(address_mappings.c.status == status)
     if branch: conditions.append(address_mappings.c.branch_name == branch)
@@ -109,8 +105,7 @@ def browse_knowledge(search_text: str = "", status: str = "", branch: str = "", 
 
 def backup_snapshot() -> str:
     from . import schema as s
-    tables = [source_files, source_rows, addresses, address_mappings, mapping_evidence, text_examples, query_rules, review_tasks, review_votes, review_decisions, model_versions, audit_events]
-    data: dict[str, Any] = {"format": "res_ai_v2_backup", "tables": {}}
+    tables = [source_files, source_rows, addresses, address_mappings, mapping_evidence, text_examples, query_rules, review_tasks, review_votes, review_decisions, model_versions, audit_events]; data: dict[str, Any] = {"format": "res_ai_v2_backup", "tables": {}}
     with get_engine().connect() as conn:
         for table in tables:
             rows = [dict(row._mapping) for row in conn.execute(select(table))]
