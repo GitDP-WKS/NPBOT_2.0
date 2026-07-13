@@ -7,20 +7,19 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-          cache: pip
-      - name: Install dependencies
+          show-progress: false
+      - name: Create environment
         run: |
-          python -m pip install -q --upgrade pip
-          pip install -q -r requirements.txt -r requirements-dev.txt
+          python3 -m venv .venv
+          .venv/bin/pip install -q --upgrade pip
+          .venv/bin/pip install -q -r requirements.txt -r requirements-dev.txt
       - name: Lint
-        run: ruff check .
+        run: .venv/bin/ruff check .
       - name: Tests
-        run: pytest
+        run: .venv/bin/pytest
       - name: Compile
-        run: python -m compileall -q app.py res_ai_v2 tests
+        run: .venv/bin/python -m compileall -q app.py res_ai_v2 tests
