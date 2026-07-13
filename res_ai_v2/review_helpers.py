@@ -5,7 +5,7 @@ from typing import Any
 
 from sqlalchemy import insert, select, update
 
-from .db import get_engine, utcnow
+from .db import utcnow
 from .normalize import normalize_entity, normalize_text, sha256_parts, stable_json
 from .schema import addresses, address_mappings, query_rules, text_examples
 from .structure import CURRENT_STRUCTURE
