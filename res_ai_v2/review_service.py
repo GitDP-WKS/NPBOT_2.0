@@ -5,7 +5,7 @@ from typing import Any
 
 from sqlalchemy import select
 
-from .agent import run_agent_cycle
+from .agent import run_until_event
 from .db import get_engine, initialize_database
 from .event_bus import publish_event
 from .reviews import submit_review
@@ -81,20 +81,16 @@ def submit_review_and_update_agent(
         },
         deduplication_key=f"decision:{decision_id}",
     )
-    cycle = run_agent_cycle(max_events=20)
-    event_result = next(
-        (item for item in cycle.results if item.get("event_id") == event_id),
-        None,
-    )
+    agent = run_until_event(event_id, max_events=200, worker_id="review-inline")
     return {
         **result,
         "decision_id": decision_id,
         "agent_event_id": event_id,
-        "agent_status": (event_result or {}).get("status", "queued"),
-        "agent_processed": cycle.processed,
+        "agent_status": agent["target_status"],
+        "agent_processed": agent["processed"],
         "agent": {
-            "processed": cycle.processed,
-            "completed": cycle.completed,
-            "failed": cycle.failed,
+            "processed": agent["processed"],
+            "completed": agent["completed"],
+            "failed": agent["failed"],
         },
     }
