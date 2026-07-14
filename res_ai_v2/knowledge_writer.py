@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import delete, insert, select, update
+from sqlalchemy import and_, delete, insert, or_, select, update
 
 from .db import get_engine, utcnow
 from .knowledge_plan import AGENT_TASK_TYPES, KnowledgePlan
@@ -20,6 +20,7 @@ from .schema import (
 from .task_sync import sync_review_tasks_in_connection
 
 BATCH_SIZE = 1000
+LEGACY_MATCH_BATCH = 150
 
 
 def _chunks(values: list[Any], size: int = BATCH_SIZE):
@@ -33,6 +34,73 @@ def _clear_working_knowledge(conn) -> None:
     conn.execute(delete(address_aliases))
     conn.execute(delete(address_mappings))
     conn.execute(delete(addresses))
+
+
+def _raw_signature(row: dict[str, Any]) -> tuple[str, str, str, str]:
+    return tuple(
+        str(row.get(field, ""))
+        for field in ("locality", "district", "settlement", "street")
+    )
+
+
+def _canonical_values(key: str, row: dict[str, Any], now) -> dict[str, Any]:
+    return {
+        "address_key": key,
+        "locality": str(row.get("locality", "")),
+        "district": str(row.get("district", "")),
+        "settlement": str(row.get("settlement", "")),
+        "street": str(row.get("street", "")),
+        "locality_key": str(row.get("locality_key", "")),
+        "district_key": str(row.get("district_key", "")),
+        "settlement_key": str(row.get("settlement_key", "")),
+        "street_key": str(row.get("street_key", "")),
+        "updated_at": now,
+    }
+
+
+def _reuse_legacy_addresses(
+    conn,
+    missing: dict[str, dict[str, Any]],
+    result: dict[str, int],
+    now,
+) -> None:
+    if not missing:
+        return
+
+    existing_by_signature: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    items = list(missing.items())
+    for batch in _chunks(items, LEGACY_MATCH_BATCH):
+        conditions = [
+            and_(
+                addresses.c.locality == str(row.get("locality", "")),
+                addresses.c.district == str(row.get("district", "")),
+                addresses.c.settlement == str(row.get("settlement", "")),
+                addresses.c.street == str(row.get("street", "")),
+            )
+            for _, row in batch
+        ]
+        for existing in conn.execute(select(addresses).where(or_(*conditions))):
+            item = dict(existing._mapping)
+            signature = _raw_signature(item)
+            previous = existing_by_signature.get(signature)
+            if previous is None or int(item["id"]) < int(previous["id"]):
+                existing_by_signature[signature] = item
+
+    used_ids = set(result.values())
+    for key, row in items:
+        match = existing_by_signature.get(_raw_signature(row))
+        if not match:
+            continue
+        address_id = int(match["id"])
+        if address_id in used_ids:
+            continue
+        conn.execute(
+            update(addresses)
+            .where(addresses.c.id == address_id)
+            .values(**_canonical_values(key, row, now))
+        )
+        result[key] = address_id
+        used_ids.add(address_id)
 
 
 def _upsert_addresses(conn, plan: KnowledgePlan) -> dict[str, int]:
@@ -51,24 +119,21 @@ def _upsert_addresses(conn, plan: KnowledgePlan) -> dict[str, int]:
             }
         )
 
+    missing = {
+        key: rows[0]
+        for key, rows in plan.groups.items()
+        if key not in result
+    }
+    _reuse_legacy_addresses(conn, missing, result, now)
+
     inserts = []
-    for key, rows in plan.groups.items():
+    for key, row in missing.items():
         if key in result:
             continue
-        row = rows[0]
         inserts.append(
             {
-                "address_key": key,
-                "locality": str(row.get("locality", "")),
-                "district": str(row.get("district", "")),
-                "settlement": str(row.get("settlement", "")),
-                "street": str(row.get("street", "")),
-                "locality_key": str(row.get("locality_key", "")),
-                "district_key": str(row.get("district_key", "")),
-                "settlement_key": str(row.get("settlement_key", "")),
-                "street_key": str(row.get("street_key", "")),
+                **_canonical_values(key, row, now),
                 "created_at": now,
-                "updated_at": now,
             }
         )
     for batch in _chunks(inserts):
@@ -102,7 +167,11 @@ def _replace_scope(conn, address_ids: list[int], full_rebuild: bool) -> None:
     conn.execute(delete(address_mappings).where(address_mappings.c.address_id.in_(address_ids)))
 
 
-def _insert_mappings(conn, plan: KnowledgePlan, address_ids: dict[str, int]) -> dict[tuple[int, str], int]:
+def _insert_mappings(
+    conn,
+    plan: KnowledgePlan,
+    address_ids: dict[str, int],
+) -> dict[tuple[int, str], int]:
     now = utcnow()
     rows = [
         {
