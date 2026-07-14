@@ -14,6 +14,7 @@ from .review_policy import is_fundamental_decision, normalize_review_selection
 from .review_queue import release_review_task, validate_review_lease
 from .reviews import submit_review
 from .schema import review_tasks
+from .source_feedback import record_source_feedback
 
 
 def _task_scope(task_id: int) -> dict[str, Any]:
@@ -80,6 +81,10 @@ def submit_review_and_update_agent(
         return result
 
     decision_id = int(result["decision_id"])
+    record_source_feedback(
+        scope["observation_ids"],
+        normalized_selection["decision_type"],
+    )
     full_rebuild = is_fundamental_decision(normalized_selection)
     event_id = publish_event(
         "human_confirmed",
