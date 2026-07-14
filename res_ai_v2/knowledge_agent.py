@@ -4,48 +4,52 @@ import json
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import insert, select, update
 
 from .db import bump_data_version, get_engine, get_setting, initialize_database, utcnow
+from .domain_queries import load_domain_observations
+from .domain_schema import canonical_observations, recalculation_log
 from .knowledge_plan import build_knowledge_plan
-from .knowledge_writer import write_knowledge
+from .knowledge_writer_v3 import write_knowledge_v3
 from .normalize import stable_json
-from .pit_schema import knowledge_directives, knowledge_generations, pit_observations
-from .pit_store import load_observations
+from .pit_schema import knowledge_directives, knowledge_generations
 from .schema import review_tasks
 from .synchronization import agent_lock
 
 KNOWLEDGE_LOCK = "knowledge-rebuild"
+FUNDAMENTAL_TRIGGERS = {
+    "full_analysis_requested",
+    "daily_full_audit",
+    "fundamental_rule_changed",
+    "structure_changed",
+    "canonicalization_changed",
+    "restore_completed",
+}
 
 
 def _load_scope(observation_ids: list[int] | None) -> list[dict[str, Any]]:
     with get_engine().connect() as conn:
         if observation_ids is None:
-            return load_observations(conn)
-        changed = load_observations(conn, observation_ids)
+            return load_domain_observations(conn)
+        changed = load_domain_observations(conn, observation_ids)
         if not changed:
             return []
-        localities = {
-            str(row.get("locality_key", ""))
-            for row in changed
-            if row.get("locality_key")
+        ambiguity_keys = {
+            str(row.get("ambiguity_key", "")) for row in changed if row.get("ambiguity_key")
         }
-        settlements = {
-            str(row.get("settlement_key", ""))
-            for row in changed
-            if row.get("settlement_key")
-        }
-        conditions = []
-        if localities:
-            conditions.append(pit_observations.c.locality_key.in_(localities))
-        if settlements:
-            conditions.append(pit_observations.c.settlement_key.in_(settlements))
-        if not conditions:
+        if not ambiguity_keys:
             return changed
-        return [
-            dict(row._mapping)
-            for row in conn.execute(select(pit_observations).where(or_(*conditions)))
-        ]
+        related_ids = sorted(
+            {
+                int(value)
+                for value in conn.scalars(
+                    select(canonical_observations.c.observation_id).where(
+                        canonical_observations.c.ambiguity_key.in_(ambiguity_keys)
+                    )
+                )
+            }
+        )
+        return load_domain_observations(conn, related_ids)
 
 
 def _load_directives() -> dict[str, dict[str, Any]]:
@@ -117,6 +121,46 @@ def _finish_generation(generation_id: int, status: str, stats: dict[str, Any]) -
         )
 
 
+def _scope_reason(
+    trigger_type: str,
+    full_rebuild: bool,
+    observation_ids: list[int] | None,
+) -> str:
+    if full_rebuild:
+        if trigger_type == "daily_full_audit":
+            return "Ежедневная обязательная сверка всей сырой ямы и фундаментальных правил."
+        if trigger_type == "full_analysis_requested":
+            return "Администратор запросил полный анализ."
+        return "Изменено фундаментальное правило или структура канонизации."
+    count = len(observation_ids or [])
+    return (
+        f"Локальный пересчет {count} измененных наблюдений и всех одноименных объектов; "
+        "остальная база не перестраивается."
+    )
+
+
+def _log_recalculation(
+    *,
+    trigger_type: str,
+    trigger_key: str,
+    full_rebuild: bool,
+    observation_count: int,
+    generation_id: int,
+) -> None:
+    with get_engine().begin() as conn:
+        conn.execute(
+            insert(recalculation_log).values(
+                trigger_type=trigger_type,
+                trigger_key=trigger_key,
+                scope="full" if full_rebuild else "local",
+                reason=_scope_reason(trigger_type, full_rebuild, None if full_rebuild else [0] * observation_count),
+                observation_count=observation_count,
+                generation_id=generation_id,
+                created_at=utcnow(),
+            )
+        )
+
+
 def _rebuild_locked(
     observation_ids: list[int] | None,
     full_rebuild: bool,
@@ -129,21 +173,26 @@ def _rebuild_locked(
         directives = _load_directives()
         current_version = int(get_setting("data_version", "1"))
         plan = build_knowledge_plan(rows, directives, current_version)
-        write_result = write_knowledge(
+        write_result = write_knowledge_v3(
             plan,
             directives,
+            generation_id=generation_id,
             full_rebuild=full_rebuild,
         )
         bump_data_version()
+        _log_recalculation(
+            trigger_type=trigger_type,
+            trigger_key=trigger_key,
+            full_rebuild=full_rebuild,
+            observation_count=len(plan.rows),
+            generation_id=generation_id,
+        )
         stats = {
             "generation_id": generation_id,
             "rows_scanned": len(plan.rows),
             "rows_changed": len(plan.mappings) + write_result["directives_applied"],
             "tasks_created": len(plan.keep_keys),
             "conflicts": sum(task["task_type"] == "mapping_conflict" for task in plan.tasks),
-            "duplicates": sum(
-                task["task_type"] == "duplicate_observation" for task in plan.tasks
-            ),
             "missing_context": sum(
                 task["task_type"] == "missing_context" for task in plan.tasks
             ),
@@ -151,11 +200,24 @@ def _rebuild_locked(
             "directive_challenges": sum(
                 task["task_type"] == "directive_challenge" for task in plan.tasks
             ),
+            "technical_duplicates": sum(
+                int(row.get("technical_duplicate_count", 0) or 0) for row in plan.rows
+            ),
+            "independent_evidence": sum(
+                int(row.get("independent_evidence_count", 0) or 0) for row in plan.rows
+            ),
+            "conditional_rules": write_result["conditional_rules"],
+            "explanations": write_result["explanations"],
             "directives_applied": write_result["directives_applied"],
             "tasks_inserted": write_result["tasks_inserted"],
             "tasks_updated": write_result["tasks_updated"],
             "stale_closed": write_result["tasks_closed"],
             "full_rebuild": full_rebuild,
+            "recalculation_reason": _scope_reason(
+                trigger_type,
+                full_rebuild,
+                observation_ids,
+            ),
         }
         _finish_generation(generation_id, "completed", stats)
         return stats
@@ -182,14 +244,15 @@ def rebuild_knowledge(
 ) -> dict[str, Any]:
     """Единственная синхронизированная точка формирования рабочей базы знаний."""
     initialize_database()
+    requested_full = full_rebuild or trigger_type in FUNDAMENTAL_TRIGGERS
     with agent_lock(
         KNOWLEDGE_LOCK,
         lease_seconds=1800,
         wait_seconds=0.0,
     ):
         return _rebuild_locked(
-            observation_ids,
-            full_rebuild,
+            None if requested_full else observation_ids,
+            requested_full,
             trigger_type,
             trigger_key,
         )
