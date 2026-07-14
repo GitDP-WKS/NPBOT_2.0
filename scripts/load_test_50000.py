@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import os
+import sys
 import time
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 os.environ.setdefault("DATABASE_URL", "sqlite:///data/load_test_50000.db")
 os.environ.setdefault("RES_AI_ALLOW_SQLITE", "1")
@@ -44,9 +49,11 @@ def make_plan(size: int = 50_000) -> ImportPlan:
 
 
 def main() -> None:
-    database = Path("data/load_test_50000.db")
+    database = ROOT / "data" / "load_test_50000.db"
+    database.parent.mkdir(parents=True, exist_ok=True)
     if database.exists():
         database.unlink()
+    os.environ["DATABASE_URL"] = f"sqlite:///{database}"
     get_engine.cache_clear()
     initialize_database.cache_clear()
     initialize_database()
