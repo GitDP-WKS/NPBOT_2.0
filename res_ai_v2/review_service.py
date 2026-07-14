@@ -10,6 +10,7 @@ from .db import get_engine
 from .event_bus import publish_event
 from .normalize import normalize_entity
 from .pit_schema import pit_observations
+from .review_policy import is_fundamental_decision, normalize_review_selection
 from .review_queue import release_review_task, validate_review_lease
 from .reviews import submit_review
 from .schema import review_tasks
@@ -23,11 +24,10 @@ def _task_scope(task_id: int) -> dict[str, Any]:
                 review_tasks.c.subject_type,
                 review_tasks.c.subject_key,
                 review_tasks.c.payload_json,
-                review_tasks.c.priority,
             ).where(review_tasks.c.id == task_id)
         ).first()
         if not row:
-            return {"observation_ids": [], "force_full": True}
+            return {"observation_ids": [], "task_type": "unknown"}
         payload = json.loads(str(row.payload_json) or "{}")
         observation_ids: set[int] = set()
         if payload.get("observation_id"):
@@ -36,7 +36,7 @@ def _task_scope(task_id: int) -> dict[str, Any]:
             observation_ids.add(int(row.subject_key))
 
         address = dict(payload.get("address") or {})
-        if address.get("locality") or address.get("settlement"):
+        if address.get("locality") or address.get("settlement") or address.get("territory"):
             keys = {
                 key: normalize_entity(str(address.get(key, "")))
                 for key in ("locality", "district", "settlement", "street")
@@ -54,19 +54,9 @@ def _task_scope(task_id: int) -> dict[str, Any]:
                 )
             )
 
-    task_type = str(row.task_type)
-    force_full = task_type == "directive_challenge" or int(row.priority) >= 110
-    if not observation_ids and task_type not in {
-        "mapping_conflict",
-        "duplicate_observation",
-        "missing_context",
-        "import_issue",
-    }:
-        force_full = True
     return {
         "observation_ids": sorted(observation_ids),
-        "force_full": force_full,
-        "task_type": task_type,
+        "task_type": str(row.task_type),
     }
 
 
@@ -79,18 +69,20 @@ def submit_review_and_update_agent(
     *,
     wait_for_agent: bool = True,
 ) -> dict[str, Any]:
-    """Принимает решение сразу, а перестройку выполняет агент."""
+    """Сохраняет ответ как директиву; рабочую базу изменяет только агент."""
     if lease_token:
         validate_review_lease(task_id, reviewer, lease_token)
 
+    normalized_selection = normalize_review_selection(selection)
     scope = _task_scope(task_id)
-    result = submit_review(task_id, reviewer, selection, is_admin)
+    result = submit_review(task_id, reviewer, normalized_selection, is_admin)
     if not result.get("applied"):
         return result
 
     decision_id = int(result["decision_id"])
+    full_rebuild = is_fundamental_decision(normalized_selection)
     event_id = publish_event(
-        "human_confirmed",
+        "fundamental_rule_changed" if full_rebuild else "human_confirmed",
         "review_decision",
         str(decision_id),
         {
@@ -98,8 +90,9 @@ def submit_review_and_update_agent(
             "decision_id": decision_id,
             "reviewer": reviewer,
             "observation_ids": scope["observation_ids"],
-            "force_full": scope["force_full"],
+            "force_full": full_rebuild,
             "task_type": scope["task_type"],
+            "decision_type": normalized_selection["decision_type"],
         },
         deduplication_key=f"decision:{decision_id}",
     )
@@ -117,6 +110,8 @@ def submit_review_and_update_agent(
         }
     return {
         **result,
+        "selection": normalized_selection,
+        "recalculation_scope": "full" if full_rebuild else "local",
         "agent_event_id": event_id,
         "agent_status": agent["target_status"],
         "agent_processed": agent["processed"],
