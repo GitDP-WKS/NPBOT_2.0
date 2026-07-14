@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import streamlit as st
 
+from .display_names import short_executor_name
 from .review_experience import present_task
 from .review_queue import claim_review_task, release_review_task
 from .review_service import submit_review_and_update_agent
@@ -14,8 +15,8 @@ def _skip_key(reviewer: str) -> str:
 
 
 def _option_label(item: dict[str, str]) -> str:
-    branch = item.get("branch", "").strip()
-    res = item.get("res", "").strip()
+    branch = short_executor_name(item.get("branch", "").strip())
+    res = short_executor_name(item.get("res", "").strip())
     return f"{res} — {branch}" if branch else res
 
 
@@ -77,7 +78,13 @@ def page_review(is_admin: bool, reviewer: str) -> None:
 
     with st.expander("Другой РЭС"):
         remaining = [res for res in CURRENT_STRUCTURE if res not in selected_res]
-        other = st.selectbox("РЭС", ["Не выбран"] + remaining)
+        other = st.selectbox(
+            "РЭС",
+            ["Не выбран"] + remaining,
+            format_func=lambda value: value
+            if value == "Не выбран"
+            else short_executor_name(value),
+        )
         if other != "Не выбран":
             selected_res.append(other)
 
