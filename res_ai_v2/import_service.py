@@ -22,12 +22,13 @@ def chunks(values: list[Any], size: int = BATCH):
         yield values[start : start + size]
 
 
-def import_plan(plan: ImportPlan, actor: str = "Администратор") -> dict[str, Any]:
-    """Сохраняет файл в яму и передает обработку агенту.
-
-    Импорт никогда не меняет рабочую базу знаний напрямую. Даже очевидные
-    строки сначала становятся сырьевыми наблюдениями.
-    """
+def import_plan(
+    plan: ImportPlan,
+    actor: str = "Администратор",
+    *,
+    wait_for_agent: bool = True,
+) -> dict[str, Any]:
+    """Сохраняет файл в яму и передает обработку агенту."""
     initialize_database()
     engine, now = get_engine(), utcnow()
     with engine.connect() as conn:
@@ -120,9 +121,19 @@ def import_plan(plan: ImportPlan, actor: str = "Администратор") -> 
         },
         deduplication_key=plan.file_hash,
     )
-    agent = run_until_event(event_id, max_events=500, worker_id="import-inline")
-    event_result = agent.get("target_result") or {}
-    analysis = (event_result.get("result") or {}).get("analysis")
+    if wait_for_agent:
+        agent = run_until_event(event_id, max_events=500, worker_id="import-inline")
+        event_result = agent.get("target_result") or {}
+        analysis = (event_result.get("result") or {}).get("analysis")
+    else:
+        agent = {
+            "processed": 0,
+            "completed": 0,
+            "failed": 0,
+            "target_status": "queued",
+        }
+        analysis = None
+
     duplicate_rows = len(rows) - len({observation_key(row) for row in rows})
     audit(
         actor,
@@ -147,6 +158,7 @@ def import_plan(plan: ImportPlan, actor: str = "Администратор") -> 
         "text_examples": 0,
         "analysis": analysis,
         "pit": pit,
+        "event_id": event_id,
         "agent": {
             "processed": agent["processed"],
             "completed": agent["completed"],
