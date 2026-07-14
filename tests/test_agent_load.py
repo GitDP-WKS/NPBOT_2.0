@@ -3,12 +3,12 @@ from __future__ import annotations
 from sqlalchemy import func, select
 
 from res_ai_v2.agent import register_handler, run_agent_cycle
+from res_ai_v2.db import get_engine
 from res_ai_v2.event_bus import publish_event
 from res_ai_v2.event_schema import agent_events
 from res_ai_v2.import_service import import_plan
 from res_ai_v2.repositories import list_review_tasks
 from res_ai_v2.review_service import submit_review_and_update_agent
-from res_ai_v2.db import get_engine
 from tests.test_import_and_analysis import make_plan
 
 
@@ -60,5 +60,6 @@ def test_import_review_agent_end_to_end(temp_db):
     }
     result = submit_review_and_update_agent(task["id"], "Администратор", selection, True)
     assert result["applied"] is True
-    assert result["agent"]["failed"] == 0
+    assert result["agent_status"] == "completed"
+    assert result["agent_processed"] >= 1
     assert list_review_tasks("Другой") == []
