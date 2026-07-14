@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: ["main", "agent/res-ai-v2"]
+    branches: ["main", "agent/res-ai-v2", "agent/event-driven-ai-core"]
 
 jobs:
   test:
@@ -30,3 +30,39 @@ jobs:
         run: .venv/bin/pytest
       - name: Compile
         run: .venv/bin/python -m compileall -q app.py res_ai_v2 tests
+      - name: Streamlit startup
+        env:
+          RES_AI_ALLOW_SQLITE: "1"
+          ADMIN_PASSWORD: "ci-admin"
+        run: |
+          .venv/bin/streamlit run app.py --server.headless true --server.port 8501 > /tmp/streamlit.log 2>&1 &
+          PID=$!
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8501/_stcore/health >/dev/null; then
+              kill "$PID"
+              wait "$PID" || true
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/streamlit.log
+          kill "$PID" || true
+          exit 1
+      - name: API startup
+        env:
+          RES_AI_ALLOW_SQLITE: "1"
+          ADMIN_PASSWORD: "ci-admin"
+        run: |
+          .venv/bin/uvicorn res_ai_v2.api:app --host 127.0.0.1 --port 8000 > /tmp/api.log 2>&1 &
+          PID=$!
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8000/v1/health >/dev/null; then
+              kill "$PID"
+              wait "$PID" || true
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/api.log
+          kill "$PID" || true
+          exit 1
