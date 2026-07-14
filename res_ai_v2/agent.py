@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .analyzer import analyze_database
+from .agent_monitor import recover_stale_events
 from .config import load_settings
 from .db import get_setting, set_setting
 from .event_bus import AgentEvent, claim_next_event, complete_event, fail_event, publish_event, worker_identity
@@ -90,6 +91,7 @@ def process_event(event: AgentEvent) -> dict[str, Any]:
 
 
 def run_agent_cycle(*, max_events: int = 20, worker_id: str | None = None) -> AgentCycleResult:
+    recover_stale_events()
     worker = worker_id or worker_identity()
     processed = completed = failed = 0
     results: list[dict[str, Any]] = []
