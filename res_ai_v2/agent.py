@@ -119,6 +119,7 @@ HANDLERS: dict[str, EventHandler] = {
     "pit_ingested": _pit_event,
     "address_changed": _human_event,
     "human_confirmed": _human_event,
+    "knowledge_directive_revoked": _human_event,
     "full_analysis_requested": _full_analysis_event,
     "daily_full_audit": _full_analysis_event,
     "training_requested": _train_candidate_event,
