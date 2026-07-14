@@ -7,7 +7,7 @@ from typing import Any
 
 from sqlalchemy import and_, delete, func, insert, or_, select, update
 
-from .db import bump_data_version, get_engine, get_setting, initialize_database, set_setting, utcnow
+from .db import bump_data_version, get_engine, increment_setting, initialize_database, utcnow
 from .event_schema import agent_effects, agent_events, agent_runs
 from .normalize import normalize_text, stable_json
 from .schema import (
@@ -171,9 +171,7 @@ def stats() -> dict[str, int]:
 
 
 def increment_human_decisions() -> int:
-    value = int(get_setting("human_decisions_since_training", "0")) + 1
-    set_setting("human_decisions_since_training", value)
-    return value
+    return increment_setting("human_decisions_since_training", 1, default=0)
 
 
 def save_query_rule(raw_query: str, selection: list[dict[str, Any]], actor: str) -> None:
