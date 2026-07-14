@@ -87,7 +87,7 @@ def migrate_legacy(actor: str = "Администратор") -> dict[str, Any]:
         ).encode()
     ).hexdigest()
     plan = ImportPlan(
-        file_hash=f"legacy-{digest}",
+        file_hash=digest,
         file_name="Миграция данных РЭС AI 1",
         source_kind="legacy",
         sheets=[
