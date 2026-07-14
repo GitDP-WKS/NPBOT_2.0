@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import streamlit as st
 
+from .agent_runtime import run_opportunistic_tick
 from .db import initialize_database, storage_name
 from .page_agent_admin import page_agent_center
 from .page_data_admin import page_home, page_knowledge, page_upload
@@ -27,6 +28,12 @@ def main() -> None:
         st.code(str(exc))
         st.info("Откройте то же развернутое приложение Streamlit или добавьте DATABASE_URL в его Secrets.")
         st.stop()
+
+    try:
+        run_opportunistic_tick(max_events=2)
+    except Exception:
+        # Ошибка конкретного события сохраняется в очереди агента и видна администратору.
+        pass
 
     is_admin = admin_login()
     reviewer = "Администратор" if is_admin else st.sidebar.text_input("Проверяющий", placeholder="Фамилия и имя")
