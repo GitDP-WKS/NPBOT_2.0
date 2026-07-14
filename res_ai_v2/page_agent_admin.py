@@ -4,7 +4,7 @@ import pandas as pd
 import streamlit as st
 
 from .agent import run_agent_cycle
-from .agent_monitor import agent_status, recent_agent_events, recent_agent_runs, recover_stale_events
+from .agent_monitor import recent_agent_events, recent_agent_runs, recover_stale_events
 from .diagnostics import run_diagnostics
 
 
