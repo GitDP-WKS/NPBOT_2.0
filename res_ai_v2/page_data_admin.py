@@ -5,12 +5,10 @@ import streamlit as st
 
 from .import_service import import_plan
 from .importer import FIELD_LABELS, inspect_excel
-from .legacy import legacy_available, migrate_legacy
 from .quality import dashboard
-from .repositories import backup_snapshot, browse_knowledge, recent_audit
-from .reviews import recent_decisions, undo_decision
+from .repositories import browse_knowledge
 from .structure import CURRENT_STRUCTURE
-from .ui_labels import action_label, entity_label, source_kind_label, status_label
+from .ui_labels import source_kind_label, status_label
 
 
 def page_home() -> None:
@@ -25,7 +23,10 @@ def page_home() -> None:
     cols[0].metric("Проверено человеком", values["human_verified"])
     cols[1].metric("Размеченных текстов", values["text_examples"])
     cols[2].metric("Статус модели", values["model_status"])
-    cols[3].metric("Точность модели", "—" if values["model_accuracy"] is None else f"{values['model_accuracy']:.2f}%")
+    cols[3].metric(
+        "Точность модели",
+        "—" if values["model_accuracy"] is None else f"{values['model_accuracy']:.2f}%",
+    )
 
 
 def _preview(plan) -> pd.DataFrame:
@@ -47,7 +48,9 @@ def _preview(plan) -> pd.DataFrame:
 
 def page_upload() -> None:
     st.header("Загрузка")
-    st.write("Загрузите любой Excel. Система сама ищет заголовки и определяет назначение столбцов по названиям и содержимому.")
+    st.write(
+        "Загрузите любой Excel. Система сама ищет заголовки и определяет назначение столбцов по названиям и содержимому."
+    )
     uploaded = st.file_uploader("Excel-файл", type=["xlsx", "xls"])
     if not uploaded:
         return
@@ -88,7 +91,7 @@ def page_upload() -> None:
             cols[1].metric("Добавлено", result["imported"])
             cols[2].metric("Дубли внутри файла", result["duplicates"])
             cols[3].metric("Требуют уточнения", result["issues"])
-            st.success("Данные сохранены в Neon. Закрытие страницы ничего не удалит.")
+            st.success("Данные сохранены в Neon и автоматически проанализированы агентом.")
 
 
 def page_knowledge() -> None:
@@ -126,70 +129,10 @@ def page_knowledge() -> None:
     if rows:
         frame = pd.DataFrame(rows).rename(columns=rename)
         frame["Статус"] = frame["Статус"].map(status_label)
-        frame["Доверие источнику"] = frame["Доверие источнику"].map(lambda value: f"{float(value):.1f}%")
+        frame["Доверие источнику"] = frame["Доверие источнику"].map(
+            lambda value: f"{float(value):.1f}%"
+        )
         frame = frame[list(rename.values())]
     else:
         frame = pd.DataFrame(columns=list(rename.values()))
     st.dataframe(frame, use_container_width=True, hide_index=True)
-
-
-def page_journal() -> None:
-    st.header("Журнал")
-    tab1, tab2 = st.tabs(["Действия", "Принятые решения"])
-    with tab1:
-        rows = recent_audit()
-        if rows:
-            frame = pd.DataFrame(rows)
-            rename = {
-                "actor": "Пользователь",
-                "action": "Действие",
-                "entity_type": "Объект",
-                "entity_key": "Идентификатор",
-                "before_json": "Было",
-                "after_json": "Стало",
-                "created_at": "Дата и время",
-            }
-            frame = frame.rename(columns=rename)
-            if "Действие" in frame:
-                frame["Действие"] = frame["Действие"].map(action_label)
-            if "Объект" in frame:
-                frame["Объект"] = frame["Объект"].map(entity_label)
-            visible = [column for column in rename.values() if column in frame.columns]
-            st.dataframe(frame[visible], use_container_width=True, hide_index=True)
-        else:
-            st.info("Действий пока нет.")
-    with tab2:
-        decisions = recent_decisions()
-        st.dataframe(pd.DataFrame(decisions), use_container_width=True, hide_index=True)
-        active = [row for row in decisions if row.get("active")]
-        if active:
-            labels = {f"№{row['id']} · {row['title']} · {row['applied_by']}": int(row["id"]) for row in active}
-            selected = st.selectbox("Решение для отмены", list(labels))
-            if st.button("Отменить выбранное решение"):
-                try:
-                    undo_decision(labels[selected])
-                    st.success("Решение отменено, задание снова открыто.")
-                    st.rerun()
-                except Exception as exc:
-                    st.error(str(exc))
-
-
-def page_settings() -> None:
-    st.header("Настройки")
-    st.subheader("Перенос данных старой версии")
-    if legacy_available():
-        st.info("Найдены старые таблицы. Они останутся без изменений; данные будут скопированы в таблицы новой версии.")
-        if st.button("Импортировать данные старой версии", type="primary"):
-            try:
-                with st.spinner("Копирую данные..."):
-                    result = migrate_legacy()
-                st.success(
-                    f"Перенесено строк: {result['rows']}; проверено человеком: {result['human_verified']}; "
-                    f"правил определения: {result['query_rules']}."
-                )
-            except Exception as exc:
-                st.error(str(exc))
-    else:
-        st.caption("Старые таблицы в подключенной базе не найдены.")
-    st.subheader("Резервная копия")
-    st.download_button("Скачать полную резервную копию", backup_snapshot(), "res_ai_v2_backup.json", "application/json")
