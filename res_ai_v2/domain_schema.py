@@ -57,7 +57,7 @@ evidence_claims = Table(
     Column("source_quality", Float, nullable=False, default=0.5),
     Column("source_accuracy", Float, nullable=False, default=0.5),
     Column("observed_at", DateTime(timezone=True), nullable=True),
-    Column("first_source_row_id", Integer, ForeignKey(source_rows.c.id), nullable=False),
+    Column("first_source_row_id", Integer, ForeignKey(source_rows.c.id), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
     UniqueConstraint(
         "observation_key",
