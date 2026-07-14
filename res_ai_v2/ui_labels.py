@@ -15,12 +15,14 @@ STATUS_LABELS = {
 }
 
 TASK_TYPE_LABELS = {
-    "import_issue": "Ошибка или неполные данные при загрузке",
+    "import_issue": "Не удалось разобрать данные",
     "mapping_conflict": "Один адрес связан с разными РЭС",
-    "missing_context": "Не хватает района или другой части адреса",
-    "prediction_review": "Проверка результата определения",
+    "duplicate_observation": "Адрес повторяется в исходных данных",
+    "directive_challenge": "Новые данные противоречат прежнему решению",
+    "missing_context": "Не хватает района или части адреса",
+    "prediction_review": "Проверка результата",
     "model_error": "Ошибка модели",
-    "low_confidence": "Низкая уверенность модели",
+    "low_confidence": "Низкая уверенность",
     "unknown_address": "Адрес не найден",
 }
 
@@ -32,8 +34,8 @@ SOURCE_KIND_LABELS = {
 }
 
 ACTION_LABELS = {
-    "review_vote": "Голос проверяющего сохранен",
-    "apply_review": "Решение применено",
+    "review_vote": "Решение проверяющего сохранено",
+    "apply_review": "Решение передано агенту",
     "undo_review": "Решение отменено",
     "review_applied": "Решение применено",
     "review_reversed": "Решение отменено",
@@ -41,14 +43,15 @@ ACTION_LABELS = {
     "model_published": "Модель опубликована",
     "model_rolled_back": "Выполнен откат модели",
     "file_imported": "Файл загружен",
+    "import_file": "Файл добавлен в яму",
 }
 
 ENTITY_LABELS = {
-    "review_vote": "Голос проверяющего",
-    "review_task": "Задание проверки",
-    "review_decision": "Решение проверки",
+    "review_vote": "Решение проверяющего",
+    "review_task": "Задание",
+    "review_decision": "Решение",
     "model": "Модель",
-    "source_file": "Загруженный файл",
+    "source_file": "Файл",
     "legacy": "Старая версия",
 }
 
