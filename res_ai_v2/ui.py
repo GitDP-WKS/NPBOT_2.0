@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import streamlit as st
 
-from .agent_runtime import run_opportunistic_tick
+from .background_worker import start_background_worker
+from .daily_audit import ensure_daily_audit
 from .db import initialize_database, storage_name
 from .page_agent_admin import page_agent_center
 from .page_data_admin import page_home, page_knowledge, page_upload
@@ -19,24 +20,23 @@ def main() -> None:
     configure()
     style()
     st.title("РЭС AI")
-    st.caption("Система определения филиала и РЭС по адресам Республики Татарстан")
+    st.caption("Определение филиала и РЭС по Республике Татарстан")
 
     try:
         initialize_database()
+        ensure_daily_audit()
+        start_background_worker()
     except Exception as exc:
-        st.error("Общая база данных недоступна. Работа остановлена, чтобы изменения не сохранялись отдельно на этом компьютере.")
+        st.error("Общая база данных недоступна.")
         st.code(str(exc))
-        st.info("Откройте то же развернутое приложение Streamlit или добавьте DATABASE_URL в его Secrets.")
         st.stop()
 
-    try:
-        run_opportunistic_tick(max_events=2)
-    except Exception:
-        # Ошибка конкретного события сохраняется в очереди агента и видна администратору.
-        pass
-
     is_admin = admin_login()
-    reviewer = "Администратор" if is_admin else st.sidebar.text_input("Проверяющий", placeholder="Фамилия и имя")
+    reviewer = (
+        "Администратор"
+        if is_admin
+        else st.sidebar.text_input("Проверяющий", placeholder="Фамилия и имя")
+    )
     pages = ["Проверка", "Определение"]
     if is_admin:
         pages = [
@@ -51,8 +51,7 @@ def main() -> None:
             "Журнал",
             "Настройки",
         ]
-    st.sidebar.success(f"Общее хранилище: {storage_name()}")
-    st.sidebar.caption("Все компьютеры должны открывать один и тот же адрес приложения Streamlit.")
+    st.sidebar.success(f"Общая база: {storage_name()}")
     page = st.sidebar.radio("Раздел", pages)
     handlers = {
         "Главная": page_home,
