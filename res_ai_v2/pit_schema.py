@@ -116,3 +116,13 @@ agent_daily_runs = Table(
     Column("result_json", Text, nullable=False, default="{}"),
     Column("updated_at", DateTime(timezone=True), nullable=False),
 )
+
+agent_locks = Table(
+    PREFIX + "agent_locks",
+    metadata,
+    Column("lock_key", String(96), primary_key=True),
+    Column("owner", String(160), nullable=False, index=True),
+    Column("lease_until", DateTime(timezone=True), nullable=False, index=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+)
