@@ -40,9 +40,17 @@ def _chunks(values: list[Any], size: int = BATCH_SIZE):
 
 
 def _trust(occurrences: int, contexts: int) -> float:
-    occurrence_score = 99.9 / max(1, occurrences)
-    context_score = 99.9 / max(1, contexts)
-    return round(max(1.0, min(99.9, occurrence_score, context_score)), 1)
+    return round(
+        max(
+            1.0,
+            min(
+                99.9,
+                99.9 / max(1, occurrences),
+                99.9 / max(1, contexts),
+            ),
+        ),
+        1,
+    )
 
 
 def _anchor(row: dict[str, Any]) -> tuple[str, str]:
@@ -67,23 +75,27 @@ def _load_scope(observation_ids: list[int] | None) -> list[dict[str, Any]]:
         if not observation_ids:
             return load_observations(conn)
         changed = load_observations(conn, observation_ids)
-        locality_keys = {
-            str(row.get("locality_key", "")) for row in changed if row.get("locality_key")
+        localities = {
+            str(row.get("locality_key", ""))
+            for row in changed
+            if row.get("locality_key")
         }
-        settlement_keys = {
+        settlements = {
             str(row.get("settlement_key", ""))
             for row in changed
             if row.get("settlement_key")
         }
         conditions = []
-        if locality_keys:
-            conditions.append(pit_observations.c.locality_key.in_(locality_keys))
-        if settlement_keys:
-            conditions.append(pit_observations.c.settlement_key.in_(settlement_keys))
+        if localities:
+            conditions.append(pit_observations.c.locality_key.in_(localities))
+        if settlements:
+            conditions.append(pit_observations.c.settlement_key.in_(settlements))
         if not conditions:
             return changed
-        query = select(pit_observations).where(or_(*conditions))
-        return [dict(row._mapping) for row in conn.execute(query)]
+        return [
+            dict(row._mapping)
+            for row in conn.execute(select(pit_observations).where(or_(*conditions)))
+        ]
 
 
 def _load_directives() -> dict[str, dict[str, Any]]:
@@ -117,8 +129,8 @@ def _load_directives() -> dict[str, dict[str, Any]]:
 
 
 def _start_generation(trigger_type: str, trigger_key: str, full_rebuild: bool) -> int:
-    now = utcnow()
     source_version = int(get_setting("data_version", "1"))
+    now = utcnow()
     with get_engine().begin() as conn:
         return int(
             conn.execute(
@@ -140,7 +152,7 @@ def _start_generation(trigger_type: str, trigger_key: str, full_rebuild: bool) -
         )
 
 
-def _finish_generation(generation_id: int, *, status: str, stats: dict[str, Any]) -> None:
+def _finish_generation(generation_id: int, status: str, stats: dict[str, Any]) -> None:
     with get_engine().begin() as conn:
         conn.execute(
             update(knowledge_generations)
@@ -167,26 +179,26 @@ def _clear_knowledge(conn) -> None:
 def _upsert_addresses(conn, groups: dict[str, list[dict[str, Any]]]) -> dict[str, int]:
     now = utcnow()
     keys = list(groups)
-    existing: dict[str, int] = {}
+    result: dict[str, int] = {}
     for batch in _chunks(keys, 1000):
-        existing.update(
+        result.update(
             {
-                str(item.address_key): int(item.id)
-                for item in conn.execute(
+                str(row.address_key): int(row.id)
+                for row in conn.execute(
                     select(addresses.c.id, addresses.c.address_key).where(
                         addresses.c.address_key.in_(batch)
                     )
                 )
             }
         )
-    payload = []
-    for address_key, rows in groups.items():
-        if address_key in existing:
+    missing = []
+    for key, rows in groups.items():
+        if key in result:
             continue
         row = rows[0]
-        payload.append(
+        missing.append(
             {
-                "address_key": address_key,
+                "address_key": key,
                 "locality": str(row.get("locality", "")),
                 "district": str(row.get("district", "")),
                 "settlement": str(row.get("settlement", "")),
@@ -199,21 +211,21 @@ def _upsert_addresses(conn, groups: dict[str, list[dict[str, Any]]]) -> dict[str
                 "updated_at": now,
             }
         )
-    for batch in _chunks(payload):
+    for batch in _chunks(missing):
         if batch:
             conn.execute(insert(addresses), batch)
     for batch in _chunks(keys, 1000):
-        existing.update(
+        result.update(
             {
-                str(item.address_key): int(item.id)
-                for item in conn.execute(
+                str(row.address_key): int(row.id)
+                for row in conn.execute(
                     select(addresses.c.id, addresses.c.address_key).where(
                         addresses.c.address_key.in_(batch)
                     )
                 )
             }
         )
-    return existing
+    return result
 
 
 def _directive_task(item: dict[str, Any]) -> dict[str, Any]:
@@ -232,10 +244,9 @@ def _directive_task(item: dict[str, Any]) -> dict[str, Any]:
 def _apply_directives(conn, directives: dict[str, dict[str, Any]]) -> int:
     applied = 0
     for item in directives.values():
-        task = _directive_task(item)
         before, after = _apply(
             conn,
-            task,
+            _directive_task(item),
             dict(item["selection"]),
             str(item["actor"]),
             1,
@@ -256,7 +267,10 @@ def _challenge_task(
     task_key: str,
     base_task: dict[str, Any],
     directive: dict[str, Any],
+    current_version: int,
 ) -> dict[str, Any] | None:
+    if current_version <= int(directive.get("source_version", 0)):
+        return None
     selected = set(directive["selection"].get("selected_res", []))
     observed = {
         str(option.get("res", ""))
@@ -275,7 +289,6 @@ def _challenge_task(
         "payload": {
             **base_task["payload"],
             "previous_selection": sorted(selected),
-            "allow_multiple": base_task["payload"].get("allow_multiple", False),
             "allow_address_edit": True,
         },
         "priority": 110,
@@ -293,6 +306,7 @@ def rebuild_knowledge(
     initialize_database()
     generation_id = _start_generation(trigger_type, trigger_key, full_rebuild)
     try:
+        current_version = int(get_setting("data_version", "1"))
         rows = _load_scope(None if full_rebuild else observation_ids)
         directives = _load_directives()
         valid = [
@@ -301,50 +315,43 @@ def rebuild_knowledge(
             if (row.get("locality_key") or row.get("settlement_key"))
             and str(row.get("res_name", "")) in CURRENT_STRUCTURE
         ]
-        invalid = [row for row in rows if row not in valid]
+        valid_ids = {int(row["id"]) for row in valid}
+        invalid = [row for row in rows if int(row["id"]) not in valid_ids]
         groups = observation_groups(valid)
-        contexts_by_anchor: dict[tuple[str, str], set[tuple[str, str, str]]] = defaultdict(set)
-        rows_by_anchor: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+        contexts: dict[tuple[str, str], set[tuple[str, str, str]]] = defaultdict(set)
+        by_anchor: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
         for row in valid:
             anchor = _anchor(row)
-            if not anchor[1]:
-                continue
-            contexts_by_anchor[anchor].add(
-                (
-                    str(row.get("district_key", "")),
-                    str(row.get("locality_key", "")),
-                    str(row.get("settlement_key", "")),
+            if anchor[1]:
+                contexts[anchor].add(
+                    (
+                        str(row.get("district_key", "")),
+                        str(row.get("locality_key", "")),
+                        str(row.get("settlement_key", "")),
+                    )
                 )
-            )
-            rows_by_anchor[anchor].append(row)
+                by_anchor[anchor].append(row)
 
         tasks: list[dict[str, Any]] = []
-        keep_keys: set[str] = set()
+        keep: set[str] = set()
         now = utcnow()
-        changed = 0
         with get_engine().begin() as conn:
             if full_rebuild:
                 _clear_knowledge(conn)
             address_ids = _upsert_addresses(conn, groups)
-            affected_address_ids = list(address_ids.values())
-            if not full_rebuild and affected_address_ids:
+            affected = list(address_ids.values())
+            if not full_rebuild and affected:
                 conn.execute(
                     delete(mapping_evidence).where(
                         mapping_evidence.c.mapping_id.in_(
                             select(address_mappings.c.id).where(
-                                address_mappings.c.address_id.in_(affected_address_ids)
+                                address_mappings.c.address_id.in_(affected)
                             )
                         )
                     )
                 )
-                conn.execute(
-                    delete(text_examples).where(text_examples.c.address_id.in_(affected_address_ids))
-                )
-                conn.execute(
-                    delete(address_mappings).where(
-                        address_mappings.c.address_id.in_(affected_address_ids)
-                    )
-                )
+                conn.execute(delete(text_examples).where(text_examples.c.address_id.in_(affected)))
+                conn.execute(delete(address_mappings).where(address_mappings.c.address_id.in_(affected)))
 
             mapping_rows: list[dict[str, Any]] = []
             mapping_meta: list[tuple[str, str, list[dict[str, Any]]]] = []
@@ -356,7 +363,7 @@ def rebuild_knowledge(
                 conflict = len(by_res) > 1
                 if conflict:
                     task_key = sha256_parts(["mapping_conflict", address_key])
-                    base_task = {
+                    base = {
                         "task_key": task_key,
                         "task_type": "mapping_conflict",
                         "subject_type": "address",
@@ -385,29 +392,30 @@ def rebuild_knowledge(
                         },
                         "priority": 100,
                     }
-                    if task_key in directives:
-                        challenge = _challenge_task(task_key, base_task, directives[task_key])
-                        if challenge:
-                            keep_keys.add(challenge["task_key"])
-                            tasks.append(challenge)
-                    else:
-                        keep_keys.add(task_key)
-                        tasks.append(base_task)
+                    directive = directives.get(task_key)
+                    candidate = (
+                        _challenge_task(task_key, base, directive, current_version)
+                        if directive
+                        else base
+                    )
+                    if candidate:
+                        keep.add(candidate["task_key"])
+                        tasks.append(candidate)
 
                 anchor = _anchor(group[0])
-                contexts = len(contexts_by_anchor.get(anchor, set())) or 1
+                context_count = len(contexts.get(anchor, set())) or 1
                 for res_name, items in by_res.items():
                     occurrences = sum(int(item.get("occurrence_count", 1)) for item in items)
                     duplicate = any(int(item.get("occurrence_count", 1)) > 1 for item in items)
-                    confidence = _trust(occurrences, contexts)
-                    status = "conflict" if conflict else ("source_only" if duplicate else "consistent")
                     mapping_rows.append(
                         {
                             "address_id": address_id,
                             "res_name": res_name,
                             "branch_name": CURRENT_STRUCTURE[res_name],
-                            "status": status,
-                            "source_confidence": confidence,
+                            "status": "conflict"
+                            if conflict
+                            else ("source_only" if duplicate else "consistent"),
+                            "source_confidence": _trust(occurrences, context_count),
                             "human_confirmations": 0,
                             "active": True,
                             "created_at": now,
@@ -417,7 +425,7 @@ def rebuild_knowledge(
                     mapping_meta.append((address_key, res_name, items))
                     if duplicate and not conflict:
                         task_key = sha256_parts(["duplicate_observation", address_key, res_name])
-                        base_task = {
+                        base = {
                             "task_key": task_key,
                             "task_type": "duplicate_observation",
                             "subject_type": "address",
@@ -444,21 +452,22 @@ def rebuild_knowledge(
                             },
                             "priority": 85,
                         }
-                        if task_key in directives:
-                            challenge = _challenge_task(task_key, base_task, directives[task_key])
-                            if challenge:
-                                keep_keys.add(challenge["task_key"])
-                                tasks.append(challenge)
-                        else:
-                            keep_keys.add(task_key)
-                            tasks.append(base_task)
+                        directive = directives.get(task_key)
+                        candidate = (
+                            _challenge_task(task_key, base, directive, current_version)
+                            if directive
+                            else base
+                        )
+                        if candidate:
+                            keep.add(candidate["task_key"])
+                            tasks.append(candidate)
 
             for batch in _chunks(mapping_rows):
                 if batch:
                     conn.execute(insert(address_mappings), batch)
             mapping_ids = {
-                (int(item.address_id), str(item.res_name)): int(item.id)
-                for item in conn.execute(
+                (int(row.address_id), str(row.res_name)): int(row.id)
+                for row in conn.execute(
                     select(
                         address_mappings.c.id,
                         address_mappings.c.address_id,
@@ -466,19 +475,19 @@ def rebuild_knowledge(
                     ).where(address_mappings.c.address_id.in_(list(address_ids.values())))
                 )
             }
-
             evidence_rows = []
             text_rows: dict[str, dict[str, Any]] = {}
             for address_key, res_name, items in mapping_meta:
                 mapping_id = mapping_ids[(address_ids[address_key], res_name)]
                 for item in items:
+                    occurrence_count = max(1, int(item.get("occurrence_count", 1)))
                     evidence_rows.append(
                         {
                             "mapping_id": mapping_id,
                             "source_row_id": None,
                             "evidence_type": "pit_observation",
                             "evidence_key": str(item["observation_key"]),
-                            "weight": 1.0 / max(1, int(item.get("occurrence_count", 1))),
+                            "weight": 1.0 / occurrence_count,
                             "created_at": now,
                         }
                     )
@@ -495,7 +504,7 @@ def rebuild_knowledge(
                             "branch_name": CURRENT_STRUCTURE[res_name],
                             "status": "source_only",
                             "human_confirmations": 0,
-                            "weight": 1.0 / max(1, int(item.get("occurrence_count", 1))),
+                            "weight": 1.0 / occurrence_count,
                             "created_at": now,
                             "updated_at": now,
                         }
@@ -506,21 +515,19 @@ def rebuild_knowledge(
                 if batch:
                     conn.execute(insert(text_examples), batch)
 
-            applied_directives = _apply_directives(conn, directives)
-            valid_ids = [int(row["id"]) for row in rows]
-            for batch in _chunks(valid_ids, 1000):
+            directives_applied = _apply_directives(conn, directives)
+            for batch in _chunks([int(row["id"]) for row in rows], 1000):
                 conn.execute(
                     update(pit_observations)
                     .where(pit_observations.c.id.in_(batch))
                     .values(state="analyzed", updated_at=now)
                 )
-            changed = len(mapping_rows) + applied_directives
 
         for row in invalid:
             task_key = sha256_parts(["import_issue", str(row["observation_key"])])
             if task_key in directives:
                 continue
-            keep_keys.add(task_key)
+            keep.add(task_key)
             tasks.append(
                 {
                     "task_key": task_key,
@@ -545,29 +552,17 @@ def rebuild_knowledge(
                 }
             )
 
-        for anchor, contexts in contexts_by_anchor.items():
-            if len(contexts) <= 1:
+        for anchor, anchor_contexts in contexts.items():
+            if len(anchor_contexts) <= 1:
                 continue
-            for row in rows_by_anchor[anchor]:
+            for row in by_anchor[anchor]:
                 if row.get("district_key"):
                     continue
                 address_key = _address_key(row)
                 task_key = sha256_parts(["missing_context", address_key, str(row["res_name"])])
                 if task_key in directives:
                     continue
-                keep_keys.add(task_key)
-                candidates = [
-                    {
-                        "district": option.get("district", ""),
-                        "locality": option.get("locality", ""),
-                        "settlement": option.get("settlement", ""),
-                        "street": option.get("street", ""),
-                        "branch": option.get("branch_name", ""),
-                        "res": option.get("res_name", ""),
-                    }
-                    for option in rows_by_anchor[anchor]
-                    if option.get("district_key")
-                ]
+                keep.add(task_key)
                 tasks.append(
                     {
                         "task_key": task_key,
@@ -588,7 +583,18 @@ def rebuild_knowledge(
                                 "branch": row.get("branch_name", ""),
                                 "res": row.get("res_name", ""),
                             },
-                            "options": candidates,
+                            "options": [
+                                {
+                                    "district": option.get("district", ""),
+                                    "locality": option.get("locality", ""),
+                                    "settlement": option.get("settlement", ""),
+                                    "street": option.get("street", ""),
+                                    "branch": option.get("branch_name", ""),
+                                    "res": option.get("res_name", ""),
+                                }
+                                for option in by_anchor[anchor]
+                                if option.get("district_key")
+                            ],
                             "allow_multiple": False,
                             "allow_address_edit": True,
                         },
@@ -598,35 +604,29 @@ def rebuild_knowledge(
 
         for task in tasks:
             create_or_update_task(**task)
-        stale_closed = close_stale_tasks(AGENT_TASK_TYPES, keep_keys) if full_rebuild else 0
+        stale = close_stale_tasks(AGENT_TASK_TYPES, keep) if full_rebuild else 0
         bump_data_version()
         stats = {
             "generation_id": generation_id,
             "rows_scanned": len(rows),
-            "rows_changed": changed,
-            "tasks_created": len(keep_keys),
-            "conflicts": sum(1 for task in tasks if task["task_type"] == "mapping_conflict"),
-            "duplicates": sum(
-                1 for task in tasks if task["task_type"] == "duplicate_observation"
-            ),
-            "missing_context": sum(
-                1 for task in tasks if task["task_type"] == "missing_context"
-            ),
-            "invalid": sum(1 for task in tasks if task["task_type"] == "import_issue"),
-            "directive_challenges": sum(
-                1 for task in tasks if task["task_type"] == "directive_challenge"
-            ),
-            "directives_applied": len(directives),
-            "stale_closed": stale_closed,
+            "rows_changed": len(groups) + directives_applied,
+            "tasks_created": len(keep),
+            "conflicts": sum(t["task_type"] == "mapping_conflict" for t in tasks),
+            "duplicates": sum(t["task_type"] == "duplicate_observation" for t in tasks),
+            "missing_context": sum(t["task_type"] == "missing_context" for t in tasks),
+            "invalid": sum(t["task_type"] == "import_issue" for t in tasks),
+            "directive_challenges": sum(t["task_type"] == "directive_challenge" for t in tasks),
+            "directives_applied": directives_applied,
+            "stale_closed": stale,
             "full_rebuild": full_rebuild,
         }
-        _finish_generation(generation_id, status="completed", stats=stats)
+        _finish_generation(generation_id, "completed", stats)
         return stats
     except Exception as exc:
         _finish_generation(
             generation_id,
-            status="failed",
-            stats={
+            "failed",
+            {
                 "rows_scanned": 0,
                 "rows_changed": 0,
                 "tasks_created": 0,
