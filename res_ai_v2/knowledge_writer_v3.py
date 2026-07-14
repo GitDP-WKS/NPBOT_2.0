@@ -18,7 +18,7 @@ from .normalize import sha256_parts, stable_json
 from .pit_schema import pit_observations
 from .review_helpers import _apply
 from .review_policy import CONDITIONAL_TYPES, NO_SELECTION_TYPES
-from .schema import mapping_evidence, review_decisions, text_examples
+from .schema import address_mappings, mapping_evidence, review_decisions, text_examples
 from .task_sync import sync_review_tasks_in_connection
 
 
@@ -73,6 +73,47 @@ def _insert_explainable_evidence(
     for batch in _chunks(list(texts.values())):
         if batch:
             conn.execute(insert(text_examples), batch)
+
+
+def _apply_status_directives(
+    conn,
+    plan: KnowledgePlan,
+    directives: dict[str, dict[str, Any]],
+    address_ids: dict[str, int],
+) -> None:
+    now = utcnow()
+    for spec in plan.mappings:
+        directive = directives.get(sha256_parts(["mapping_conflict", spec.address_key]))
+        if not directive:
+            continue
+        decision_type = str(
+            (directive.get("selection") or {}).get("decision_type", "confirmed")
+        )
+        address_id = address_ids[spec.address_key]
+        query = address_mappings.c.address_id == address_id
+        if decision_type in CONDITIONAL_TYPES:
+            conn.execute(
+                update(address_mappings)
+                .where(query)
+                .values(status="conditional", active=True, updated_at=now)
+            )
+        elif decision_type == "source_error":
+            conn.execute(
+                update(address_mappings)
+                .where(query)
+                .values(
+                    status="rejected",
+                    active=False,
+                    source_confidence=0.0,
+                    updated_at=now,
+                )
+            )
+        elif decision_type in {"insufficient_data", "skip"}:
+            conn.execute(
+                update(address_mappings)
+                .where(query)
+                .values(status="ambiguous", active=True, updated_at=now)
+            )
 
 
 def _apply_directives_v3(
@@ -139,6 +180,7 @@ def write_knowledge_v3(
             _replace_scope(conn, list(address_ids.values()), False)
         mapping_ids = _insert_mappings(conn, plan, address_ids)
         _insert_explainable_evidence(conn, plan, address_ids, mapping_ids)
+        _apply_status_directives(conn, plan, directives, address_ids)
         domain_result = write_domain_outputs(
             conn,
             plan,
