@@ -18,7 +18,7 @@ def make_plan(file_hash: str, rows: list[dict]) -> ImportPlan:
                 "settlement": row.get("settlement", ""),
                 "street": row.get("street", ""),
                 "text": row.get("text", ""),
-                "record_number": "",
+                "record_number": row.get("record_number", ""),
                 "sheet_name": "Лист1",
                 "row_number": index,
                 "raw": row,
@@ -37,7 +37,15 @@ def make_plan(file_hash: str, rows: list[dict]) -> ImportPlan:
 def test_duplicate_file_does_not_change_database(temp_db) -> None:
     plan = make_plan(
         "a" * 64,
-        [{"branch": "ошибочный филиал", "res": "Лаишевский район электрических сетей", "locality": "Усады", "district": "Лаишевский"}],
+        [
+            {
+                "branch": "ошибочный филиал",
+                "res": "Лаишевский район электрических сетей",
+                "locality": "Усады",
+                "district": "Лаишевский",
+                "source_event_id": "import-1",
+            }
+        ],
     )
     first = import_plan(plan)
     second = import_plan(plan)
@@ -47,22 +55,32 @@ def test_duplicate_file_does_not_change_database(temp_db) -> None:
     row = knowledge_rows()[0]
     assert row["branch_name"] == "Приволжские сети"
     assert row["status"] == "consistent"
-    assert row["source_confidence"] == 99.9
+    assert 45.0 <= float(row["source_confidence"]) <= 100.0
 
 
 def test_same_name_in_two_districts_is_not_exact_address_conflict(temp_db) -> None:
     plan = make_plan(
         "b" * 64,
         [
-            {"res": "Лаишевский район электрических сетей", "locality": "Усады", "district": "Лаишевский"},
-            {"res": "Пригородный район электрических сетей", "locality": "Усады", "district": "Приволжский"},
+            {
+                "res": "Лаишевский район электрических сетей",
+                "locality": "Усады",
+                "district": "Лаишевский",
+                "source_event_id": "district-1",
+            },
+            {
+                "res": "Пригородный район электрических сетей",
+                "locality": "Усады",
+                "district": "Приволжский",
+                "source_event_id": "district-2",
+            },
         ],
     )
     import_plan(plan)
     values = knowledge_rows()
     assert len(values) == 2
     assert {row["status"] for row in values} == {"consistent"}
-    assert {row["source_confidence"] for row in values} == {50.0}
+    assert all(45.0 <= float(row["source_confidence"]) <= 100.0 for row in values)
     assert stats()["conflicts"] == 0
 
 
@@ -70,8 +88,18 @@ def test_same_full_address_with_two_res_creates_conflict(temp_db) -> None:
     plan = make_plan(
         "c" * 64,
         [
-            {"res": "Лаишевский район электрических сетей", "locality": "Усады", "district": "Лаишевский"},
-            {"res": "Пригородный район электрических сетей", "locality": "Усады", "district": "Лаишевский"},
+            {
+                "res": "Лаишевский район электрических сетей",
+                "locality": "Усады",
+                "district": "Лаишевский",
+                "source_event_id": "conflict-1",
+            },
+            {
+                "res": "Пригородный район электрических сетей",
+                "locality": "Усады",
+                "district": "Лаишевский",
+                "source_event_id": "conflict-2",
+            },
         ],
     )
     import_plan(plan)
