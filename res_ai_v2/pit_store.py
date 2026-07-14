@@ -6,6 +6,7 @@ from typing import Any
 
 from sqlalchemy import bindparam, func, insert, select, update
 from sqlalchemy.engine import Connection
+from sqlalchemy.exc import IntegrityError
 
 from .normalize import normalize_entity, normalize_text, sha256_parts
 from .pit_schema import pit_observations, pit_occurrences
@@ -62,6 +63,28 @@ def _payload(row: dict[str, Any], now: datetime) -> dict[str, Any]:
     }
 
 
+def _insert_missing_observations(
+    conn: Connection,
+    missing: list[dict[str, Any]],
+) -> None:
+    """Вставляет новые наблюдения, не падая при параллельной вставке того же ключа."""
+    for batch in _chunks(missing):
+        if not batch:
+            continue
+        try:
+            with conn.begin_nested():
+                conn.execute(insert(pit_observations), batch)
+            continue
+        except IntegrityError:
+            pass
+        for payload in batch:
+            try:
+                with conn.begin_nested():
+                    conn.execute(insert(pit_observations).values(**payload))
+            except IntegrityError:
+                continue
+
+
 def ingest_pit_rows(
     conn: Connection,
     *,
@@ -107,9 +130,7 @@ def ingest_pit_rows(
     existing_ids = set(observation_ids.values())
 
     missing = [payload for key, payload in payload_by_key.items() if key not in observation_ids]
-    for batch in _chunks(missing):
-        if batch:
-            conn.execute(insert(pit_observations), batch)
+    _insert_missing_observations(conn, missing)
 
     for batch in _chunks(keys):
         observation_ids.update(
