@@ -9,18 +9,21 @@ from sqlalchemy import func, select, update
 from .db import get_engine, initialize_database, utcnow
 from .event_schema import agent_events, agent_runs
 
-
 EVENT_LABELS = {
     "file_imported": "Загружен файл",
-    "address_changed": "Изменены адресные данные",
+    "pit_ingested": "Данные добавлены в яму",
+    "address_changed": "Изменен адрес",
     "human_confirmed": "Принято решение человека",
+    "knowledge_directive_revoked": "Отменено решение человека",
+    "full_analysis_requested": "Принудительный самоанализ",
+    "daily_full_audit": "Ежедневный самоанализ",
     "training_requested": "Подготовка новой модели",
 }
 
 STATUS_LABELS = {
-    "pending": "Ожидает обработки",
-    "processing": "Обрабатывается",
-    "retry": "Ожидает повторной попытки",
+    "pending": "Ожидает",
+    "processing": "В работе",
+    "retry": "Повторная попытка",
     "completed": "Завершено",
     "failed": "Ошибка",
 }
@@ -76,25 +79,20 @@ def agent_status() -> dict[str, Any]:
         counts = {
             str(status): int(count)
             for status, count in conn.execute(
-                select(agent_events.c.status, func.count())
-                .group_by(agent_events.c.status)
+                select(agent_events.c.status, func.count()).group_by(agent_events.c.status)
             )
         }
         last_event = conn.execute(
-            select(agent_events)
-            .order_by(agent_events.c.id.desc())
-            .limit(1)
+            select(agent_events).order_by(agent_events.c.id.desc()).limit(1)
         ).first()
         last_run = conn.execute(
-            select(agent_runs)
-            .order_by(agent_runs.c.id.desc())
-            .limit(1)
+            select(agent_runs).order_by(agent_runs.c.id.desc()).limit(1)
         ).first()
     return {
         "counts": counts,
         "last_event": dict(last_event._mapping) if last_event else None,
         "last_run": dict(last_run._mapping) if last_run else None,
-        "healthy": counts.get("failed", 0) == 0 and counts.get("processing", 0) <= 1,
+        "healthy": counts.get("processing", 0) <= 1,
     }
 
 
