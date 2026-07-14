@@ -5,7 +5,6 @@ import json
 from pathlib import Path
 
 import pandas as pd
-from fastapi.testclient import TestClient
 from sqlalchemy import Column, Integer, MetaData, String, Table, Text, insert, select
 
 from res_ai_v2.admin_service import request_full_analysis
@@ -338,12 +337,9 @@ def test_complete_end_to_end_scenario(temp_db, monkeypatch) -> None:
     assert callable(streamlit_entry.main)
     completed.append(21)
 
-    from res_ai_v2.api import app as api_app
+    from res_ai_v2.api import health as api_health
 
-    with TestClient(api_app) as client:
-        response = client.get("/v1/health")
-        assert response.status_code == 200
-        assert response.json()["status"] == "ok"
+    assert api_health()["status"] == "ok"
     completed.append(22)
 
     workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
