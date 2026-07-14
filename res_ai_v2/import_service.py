@@ -6,6 +6,7 @@ from sqlalchemy import insert, select, update
 
 from .agent import run_until_event
 from .db import bump_data_version, get_engine, initialize_database, utcnow
+from .domain_ingest import reconcile_domain_evidence
 from .event_bus import publish_event
 from .importer import ImportPlan, canonical_row_key
 from .normalize import row_hash, sha256_parts, stable_json
@@ -29,8 +30,11 @@ def _already_loaded(plan: ImportPlan) -> dict[str, Any]:
         "seen": plan.detected_rows,
         "imported": 0,
         "duplicates": plan.detected_rows,
+        "technical_duplicates": plan.detected_rows,
+        "independent_evidence": 0,
         "issues": 0,
         "analysis": None,
+        "event_id": None,
     }
 
 
@@ -114,12 +118,32 @@ def _store_plan(
                 source_row_ids=source_row_ids,
                 now=now,
             )
+            domain = reconcile_domain_evidence(
+                conn,
+                source_file_id=source_id,
+                file_hash=plan.file_hash,
+                source_kind=plan.source_kind,
+                rows=rows,
+                source_row_ids=source_row_ids,
+                now=now,
+            )
+            pit.update(domain)
+            pit["occurrences"] = int(domain["accepted_evidence"])
             conn.execute(
                 update(source_files)
                 .where(source_files.c.id == source_id)
-                .values(imported_rows=pit["observations"], status="imported")
+                .values(imported_rows=domain["accepted_evidence"], status="imported")
             )
         return source_id, pit
+
+
+def _idle_agent() -> dict[str, Any]:
+    return {
+        "processed": 0,
+        "completed": 0,
+        "failed": 0,
+        "target_status": "not_required",
+    }
 
 
 def import_plan(
@@ -128,7 +152,7 @@ def import_plan(
     *,
     wait_for_agent: bool = True,
 ) -> dict[str, Any]:
-    """Сохраняет файл в яму и передает обработку агенту."""
+    """Сохраняет файл в яму и передает агенту только новые доказательства."""
     initialize_database()
     rows = _prepare_rows(plan)
     stored = _store_plan(plan, rows)
@@ -136,32 +160,37 @@ def import_plan(
         return _already_loaded(plan)
     source_id, pit = stored
 
-    bump_data_version()
-    event_id = publish_event(
-        "pit_ingested",
-        "source_file",
-        str(source_id),
-        {
-            "file_hash": plan.file_hash,
-            "observation_ids": pit["observation_ids"],
-            "occurrences": pit["occurrences"],
-        },
-        deduplication_key=plan.file_hash,
-    )
-    if wait_for_agent:
-        agent = run_until_event(event_id, max_events=500, worker_id="import-inline")
-        event_result = agent.get("target_result") or {}
-        analysis = (event_result.get("result") or {}).get("analysis")
-    else:
-        agent = {
-            "processed": 0,
-            "completed": 0,
-            "failed": 0,
-            "target_status": "queued",
-        }
-        analysis = None
+    accepted = int(pit.get("accepted_evidence", 0))
+    event_id: int | None = None
+    analysis: dict[str, Any] | None = None
+    agent = _idle_agent()
+    if accepted > 0:
+        bump_data_version()
+        event_id = publish_event(
+            "pit_ingested",
+            "source_file",
+            str(source_id),
+            {
+                "file_hash": plan.file_hash,
+                "observation_ids": pit["observation_ids"],
+                "accepted_evidence": accepted,
+                "independent_evidence": pit.get("independent_evidence", 0),
+            },
+            deduplication_key=plan.file_hash,
+        )
+        if wait_for_agent:
+            agent = run_until_event(event_id, max_events=500, worker_id="import-inline")
+            event_result = agent.get("target_result") or {}
+            analysis = (event_result.get("result") or {}).get("analysis")
+        else:
+            agent = {
+                "processed": 0,
+                "completed": 0,
+                "failed": 0,
+                "target_status": "queued",
+            }
 
-    duplicate_rows = len(rows) - len({observation_key(row) for row in rows})
+    duplicate_rows = int(pit.get("technical_duplicates", 0))
     audit(
         actor,
         "import_file",
@@ -171,16 +200,19 @@ def import_plan(
         {
             "file_name": plan.file_name,
             "rows": len(rows),
-            "observations": pit["observations"],
-            "duplicate_rows": duplicate_rows,
+            "accepted_evidence": accepted,
+            "independent_evidence": pit.get("independent_evidence", 0),
+            "technical_duplicates": duplicate_rows,
             "event_id": event_id,
         },
     )
     return {
         "already_loaded": False,
         "seen": len(rows),
-        "imported": pit["observations"],
+        "imported": accepted,
         "duplicates": duplicate_rows,
+        "technical_duplicates": duplicate_rows,
+        "independent_evidence": int(pit.get("independent_evidence", 0)),
         "issues": int((analysis or {}).get("tasks_created", 0)),
         "text_examples": 0,
         "analysis": analysis,
