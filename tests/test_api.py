@@ -14,3 +14,5 @@ def test_system_status_contains_agent_queue(temp_db) -> None:
     assert result["storage"] == "SQLite (локально)"
     assert "database" in result
     assert "event_queue" in result
+    assert "diagnostics" in result
+    assert result["diagnostics"]["healthy"] is True
