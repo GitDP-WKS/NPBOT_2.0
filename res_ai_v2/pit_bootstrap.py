@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-import json
-from collections import defaultdict
 from typing import Any
 
 from sqlalchemy import func, insert, select, update
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
 
-from .normalize import normalize_entity, normalize_text, sha256_parts, stable_json
+from .normalize import normalize_entity, normalize_text, sha256_parts
 from .pit_schema import knowledge_directives, pit_observations, pit_occurrences
 from .schema import (
     address_mappings,
