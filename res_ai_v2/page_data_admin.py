@@ -6,7 +6,7 @@ import streamlit as st
 from .import_service import import_plan
 from .importer import FIELD_LABELS, inspect_excel
 from .quality import dashboard
-from .repositories import browse_knowledge
+from .repositories import backup_snapshot, browse_knowledge
 from .structure import CURRENT_STRUCTURE
 from .ui_labels import source_kind_label, status_label
 
@@ -136,3 +136,21 @@ def page_knowledge() -> None:
     else:
         frame = pd.DataFrame(columns=list(rename.values()))
     st.dataframe(frame, use_container_width=True, hide_index=True)
+
+
+def page_settings() -> None:
+    st.header("Настройки")
+    st.subheader("Резервная копия")
+    st.write(
+        "Копия содержит базу знаний, источники, задания, голоса, решения, модели, журнал и очередь агента."
+    )
+    st.download_button(
+        "Скачать полную резервную копию",
+        backup_snapshot(),
+        "res_ai_v2_backup.json",
+        "application/json",
+        use_container_width=True,
+    )
+    st.info(
+        "Перенос данных старой версии убран из ежедневного интерфейса. Он не запускается случайным нажатием и не изменяет рабочую базу."
+    )
