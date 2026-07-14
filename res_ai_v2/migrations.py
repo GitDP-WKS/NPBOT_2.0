@@ -25,9 +25,10 @@ from .pit_schema import (  # noqa: F401
     pit_occurrences,
     review_task_leases,
 )
+from .restore_schema import restore_requests  # noqa: F401
 from .schema import metadata, schema_migrations
 
-LATEST_SCHEMA_VERSION = 5
+LATEST_SCHEMA_VERSION = 6
 
 
 def run_migrations(engine: Engine) -> int:
@@ -45,6 +46,7 @@ def run_migrations(engine: Engine) -> int:
             3: "Сырая яма, директивы агента, поколения знаний и аренда заданий",
             4: "Межпроцессные замки общей синхронизации агента",
             5: "Канонические адреса, происхождение доказательств и объяснения решений",
+            6: "Очередь безопасного восстановления через агента",
         }
         for version, description in migrations.items():
             if version in applied:
