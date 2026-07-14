@@ -1,0 +1,72 @@
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from sqlalchemy import select
+
+from .agent import run_agent_cycle
+from .db import get_engine, initialize_database
+from .event_bus import publish_event
+from .reviews import submit_review
+from .schema import address_mappings, review_tasks
+
+
+def _affected_address_ids(task_id: int) -> list[int]:
+    initialize_database()
+    with get_engine().connect() as conn:
+        row = conn.execute(
+            select(review_tasks.c.payload_json).where(review_tasks.c.id == task_id)
+        ).first()
+        if not row:
+            return []
+        payload = json.loads(str(row.payload_json) or "{}")
+        mapping_ids: set[int] = set()
+        if payload.get("mapping_id"):
+            mapping_ids.add(int(payload["mapping_id"]))
+        for option in payload.get("options") or []:
+            if option.get("mapping_id"):
+                mapping_ids.add(int(option["mapping_id"]))
+        if not mapping_ids:
+            return []
+        return sorted(
+            {
+                int(value)
+                for value in conn.scalars(
+                    select(address_mappings.c.address_id).where(
+                        address_mappings.c.id.in_(mapping_ids)
+                    )
+                )
+            }
+        )
+
+
+def submit_review_and_update_agent(
+    task_id: int,
+    reviewer: str,
+    selection: dict[str, Any],
+    is_admin: bool,
+) -> dict[str, Any]:
+    result = submit_review(task_id, reviewer, selection, is_admin)
+    if not result.get("applied"):
+        return result
+
+    address_ids = _affected_address_ids(task_id)
+    event_id = publish_event(
+        "human_confirmed",
+        "review_task",
+        str(task_id),
+        {"address_ids": address_ids, "reviewer": reviewer},
+        deduplication_key=f"{task_id}:{json.dumps(selection, ensure_ascii=False, sort_keys=True)}",
+    )
+    cycle = run_agent_cycle(max_events=20)
+    event_result = next(
+        (item for item in cycle.results if item.get("event_id") == event_id),
+        None,
+    )
+    return {
+        **result,
+        "agent_event_id": event_id,
+        "agent_status": (event_result or {}).get("status", "queued"),
+        "agent_processed": cycle.processed,
+    }
