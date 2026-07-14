@@ -5,6 +5,7 @@ import threading
 import time
 from typing import Any
 
+from . import restore_agent  # noqa: F401
 from .agent import run_agent_cycle
 from .daily_audit import ensure_daily_audit
 
