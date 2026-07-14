@@ -32,6 +32,9 @@ SOURCE_KIND_LABELS = {
 }
 
 ACTION_LABELS = {
+    "review_vote": "Голос проверяющего сохранен",
+    "apply_review": "Решение применено",
+    "undo_review": "Решение отменено",
     "review_applied": "Решение применено",
     "review_reversed": "Решение отменено",
     "legacy_migrated": "Данные старой версии перенесены",
@@ -41,6 +44,7 @@ ACTION_LABELS = {
 }
 
 ENTITY_LABELS = {
+    "review_vote": "Голос проверяющего",
     "review_task": "Задание проверки",
     "review_decision": "Решение проверки",
     "model": "Модель",
