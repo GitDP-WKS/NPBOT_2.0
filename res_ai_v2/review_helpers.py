@@ -201,7 +201,11 @@ def _apply(
         ).first()
         before["query_rule"] = dict(row._mapping) if row else None
 
-    if task_type in {"mapping_conflict", "duplicate_observation"}:
+    if task_type in {
+        "mapping_conflict",
+        "duplicate_observation",
+        "directive_challenge",
+    }:
         if old_address_ids:
             conn.execute(
                 update(address_mappings)
