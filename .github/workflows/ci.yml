@@ -28,8 +28,14 @@ jobs:
         run: .venv/bin/ruff check .
       - name: Tests
         run: .venv/bin/pytest
+      - name: Load test 50000
+        if: github.head_ref == 'agent/knowledge-pit-v3'
+        env:
+          RES_AI_ALLOW_SQLITE: "1"
+          RES_AI_DISABLE_BACKGROUND_WORKER: "1"
+        run: .venv/bin/python scripts/load_test_50000.py
       - name: Compile
-        run: .venv/bin/python -m compileall -q app.py res_ai_v2 tests
+        run: .venv/bin/python -m compileall -q app.py res_ai_v2 tests scripts
       - name: Streamlit startup
         env:
           RES_AI_ALLOW_SQLITE: "1"
