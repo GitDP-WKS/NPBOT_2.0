@@ -58,14 +58,25 @@ def _analyze_event(event: AgentEvent) -> dict[str, Any]:
     }
 
 
+def _full_analysis_event(event: AgentEvent) -> dict[str, Any]:
+    return {
+        "event": event.event_type,
+        "subject": event.subject_key,
+        "scope": "full_database",
+        "analysis": analyze_database(),
+    }
+
+
 def _train_candidate_event(event: AgentEvent) -> dict[str, Any]:
-    result = train_candidate(actor="Агент РЭС AI")
+    actor = str(event.payload.get("actor") or "Агент РЭС AI")
+    result = train_candidate(actor=actor)
     set_setting("human_decisions_since_training", "0")
     return {
         "event": event.event_type,
         "version": result["version"],
         "gate_passed": result["gate_passed"],
         "metrics": result["metrics"],
+        "confusion": result.get("confusion", []),
         "published": False,
         "message": "Кандидат подготовлен. Публикация выполняется администратором.",
     }
@@ -75,6 +86,7 @@ HANDLERS: dict[str, EventHandler] = {
     "file_imported": _analyze_event,
     "address_changed": _analyze_event,
     "human_confirmed": _analyze_event,
+    "full_analysis_requested": _full_analysis_event,
     "training_requested": _train_candidate_event,
 }
 
