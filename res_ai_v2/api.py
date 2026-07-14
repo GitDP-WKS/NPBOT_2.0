@@ -8,6 +8,7 @@ from fastapi import FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from .agent import run_agent_cycle
+from .agent_runtime import run_opportunistic_tick
 from .config import load_settings
 from .db import initialize_database, storage_name
 from .diagnostics import run_diagnostics
@@ -23,6 +24,7 @@ from .search import load_search_index, predict
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     initialize_database()
+    run_opportunistic_tick(max_events=2)
     yield
 
 
