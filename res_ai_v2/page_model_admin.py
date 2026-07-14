@@ -3,8 +3,8 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from .analyzer import analyze_database
-from .modeling import list_model_versions, publish_candidate, rollback_model, train_candidate
+from .admin_service import request_analysis_and_training, request_full_analysis, request_training
+from .modeling import list_model_versions, publish_candidate, rollback_model
 from .quality import quality_details
 from .ui_labels import status_label, task_type_label
 
@@ -19,7 +19,7 @@ def _metrics(result) -> None:
     if result.get("gate_passed"):
         st.success("Кандидат прошел проверку качества.")
     else:
-        for reason in result.get("gate_reasons", []):
+        for reason in metrics.get("gate_reasons", []):
             st.warning(reason)
     per_res = [
         {
@@ -45,31 +45,48 @@ def _metrics(result) -> None:
         st.dataframe(frame, use_container_width=True, hide_index=True)
 
 
+def _show_agent_failure(payload: dict) -> bool:
+    agent = payload.get("agent") or {}
+    if int(agent.get("failed", 0)) > 0:
+        st.error("Операция не завершена. Подробности сохранены в Центре управления агентом.")
+        return True
+    return False
+
+
 def page_training() -> None:
     st.header("Анализ и обучение")
     st.write(
-        "Анализ ищет противоречия и адреса, которым не хватает района. Обучение использует только однозначные связи "
-        "и проверенные тексты. Многозначные адреса в обучение не попадают."
+        "Все операции выполняет единый агент. Анализ формирует задания человеку, а обучение создает кандидата модели. "
+        "Рабочая модель меняется только после решения администратора."
     )
     a, b, c = st.columns(3)
     if a.button("Проанализировать базу", use_container_width=True):
-        with st.spinner("Проверяю базу..."):
-            result = analyze_database()
-        st.success(
-            f"Сформировано заданий: {result['tasks']}; противоречий: {result['conflicts']}; "
-            f"адресов без района: {result['missing_context']}."
-        )
-    if b.button("Обучить новую версию", use_container_width=True):
+        with st.spinner("Агент проверяет базу..."):
+            response = request_full_analysis()
+        if not _show_agent_failure(response):
+            result = (response.get("result") or {}).get("analysis") or {}
+            st.success(
+                f"Сформировано заданий: {result.get('tasks', 0)}; "
+                f"противоречий: {result.get('conflicts', 0)}; "
+                f"адресов без района: {result.get('missing_context', 0)}."
+            )
+    if b.button("Подготовить новую модель", use_container_width=True):
         try:
-            with st.spinner("Обучаю и проверяю модель..."):
-                st.session_state["last_training"] = train_candidate()
+            with st.spinner("Агент обучает и проверяет кандидата..."):
+                response = request_training()
+            if not _show_agent_failure(response):
+                st.session_state["last_training"] = response.get("result")
         except Exception as exc:
             st.error(str(exc))
-    if c.button("Проанализировать и обучить", type="primary", use_container_width=True):
+    if c.button("Полный цикл", type="primary", use_container_width=True):
         try:
-            with st.spinner("Анализирую базу и обучаю новую версию..."):
-                analyze_database()
-                st.session_state["last_training"] = train_candidate()
+            with st.spinner("Агент анализирует базу и готовит кандидата..."):
+                response = request_analysis_and_training()
+            analysis = response.get("analysis") or {}
+            training = response.get("training") or {}
+            if not _show_agent_failure(analysis) and training and not _show_agent_failure(training):
+                st.session_state["last_training"] = training.get("result")
+                st.success("Анализ завершен, кандидат модели подготовлен.")
         except Exception as exc:
             st.error(str(exc))
     if st.session_state.get("last_training"):
