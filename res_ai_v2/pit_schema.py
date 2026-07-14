@@ -68,6 +68,7 @@ knowledge_directives = Table(
     Column("subject_type", String(32), nullable=False),
     Column("subject_key", String(128), nullable=False, index=True),
     Column("selection_json", Text, nullable=False),
+    Column("evidence_signature", String(64), nullable=False, default="", index=True),
     Column("actor", Text, nullable=False),
     Column("source_version", Integer, nullable=False, default=0),
     Column("active", Boolean, nullable=False, default=True, index=True),
