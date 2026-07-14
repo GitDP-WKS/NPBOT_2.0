@@ -13,6 +13,9 @@ from .normalize import stable_json
 from .pit_schema import knowledge_directives, knowledge_generations, pit_observations
 from .pit_store import load_observations
 from .schema import review_tasks
+from .synchronization import agent_lock
+
+KNOWLEDGE_LOCK = "knowledge-rebuild"
 
 
 def _load_scope(observation_ids: list[int] | None) -> list[dict[str, Any]]:
@@ -114,15 +117,12 @@ def _finish_generation(generation_id: int, status: str, stats: dict[str, Any]) -
         )
 
 
-def rebuild_knowledge(
-    *,
-    observation_ids: list[int] | None = None,
-    full_rebuild: bool = False,
-    trigger_type: str = "agent",
-    trigger_key: str = "automatic",
+def _rebuild_locked(
+    observation_ids: list[int] | None,
+    full_rebuild: bool,
+    trigger_type: str,
+    trigger_key: str,
 ) -> dict[str, Any]:
-    """Единственная точка, которая формирует рабочую базу знаний."""
-    initialize_database()
     generation_id = _start_generation(trigger_type, trigger_key, full_rebuild)
     try:
         rows = _load_scope(None if full_rebuild else observation_ids)
@@ -171,3 +171,25 @@ def rebuild_knowledge(
             },
         )
         raise
+
+
+def rebuild_knowledge(
+    *,
+    observation_ids: list[int] | None = None,
+    full_rebuild: bool = False,
+    trigger_type: str = "agent",
+    trigger_key: str = "automatic",
+) -> dict[str, Any]:
+    """Единственная синхронизированная точка формирования рабочей базы знаний."""
+    initialize_database()
+    with agent_lock(
+        KNOWLEDGE_LOCK,
+        lease_seconds=1800,
+        wait_seconds=0.0,
+    ):
+        return _rebuild_locked(
+            observation_ids,
+            full_rebuild,
+            trigger_type,
+            trigger_key,
+        )
