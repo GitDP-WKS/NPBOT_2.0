@@ -14,6 +14,28 @@ from .repositories import audit, increment_human_decisions
 from .schema import review_decisions, review_tasks, review_votes
 
 
+def _evidence_signature(task: dict[str, Any]) -> str:
+    payload = json.loads(str(task.get("payload_json", "{}")) or "{}")
+    options = [
+        {
+            "res": str(option.get("res", "")),
+            "district": str(option.get("district", "")),
+            "occurrences": int(option.get("occurrences", 0) or 0),
+        }
+        for option in payload.get("options", [])
+    ]
+    options.sort(key=lambda item: (item["res"], item["district"], item["occurrences"]))
+    return sha256_parts(
+        [
+            str(task.get("task_type", "")),
+            str(task.get("subject_key", "")),
+            stable_json(payload.get("address") or {}),
+            stable_json(options),
+            str(payload.get("raw_text", "")),
+        ]
+    )
+
+
 def submit_review(
     task_id: int,
     reviewer: str,
@@ -50,6 +72,7 @@ def submit_review(
         task = dict(row._mapping)
         task_title = str(task.get("title", ""))
         task_type = str(task.get("task_type", ""))
+        evidence_signature = _evidence_signature(task)
         try:
             conn.execute(
                 insert(review_votes).values(
@@ -92,6 +115,7 @@ def submit_review(
                     subject_type=str(task.get("subject_type", "task")),
                     subject_key=str(task.get("subject_key", task_id)),
                     selection_json=encoded,
+                    evidence_signature=evidence_signature,
                     actor=actor,
                     source_version=directive_version,
                     active=True,
