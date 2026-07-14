@@ -8,8 +8,9 @@ from fastapi import FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from .agent import run_agent_cycle
-from .agent_runtime import run_opportunistic_tick
+from .background_worker import start_background_worker
 from .config import load_settings
+from .daily_audit import ensure_daily_audit
 from .db import initialize_database, storage_name
 from .diagnostics import run_diagnostics
 from .event_bus import queue_status
@@ -24,11 +25,12 @@ from .search import load_search_index, predict
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     initialize_database()
-    run_opportunistic_tick(max_events=2)
+    ensure_daily_audit()
+    start_background_worker()
     yield
 
 
-app = FastAPI(title="РЭС AI API", version="1.1.0", lifespan=lifespan)
+app = FastAPI(title="РЭС AI API", version="1.2.0", lifespan=lifespan)
 
 
 class PredictRequest(BaseModel):
@@ -133,6 +135,7 @@ def vote_endpoint(
             selection,
             request.as_admin,
             request.lease_token,
+            wait_for_agent=False,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -150,7 +153,11 @@ def import_excel_endpoint(
         raise HTTPException(status_code=422, detail="Некорректное содержимое файла.") from exc
     try:
         plan = inspect_excel(content, request.file_name)
-        return import_plan(plan, actor=request.actor)
+        return import_plan(
+            plan,
+            actor=request.actor,
+            wait_for_agent=False,
+        )
     except Exception as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
