@@ -23,9 +23,9 @@ WRITES = (
 
 ALLOWED_WRITERS = {
     "knowledge_agent.py",
+    "knowledge_writer.py",
     "review_helpers.py",
     "pit_bootstrap.py",
-    "legacy_migration.py",
 }
 
 
