@@ -1,11 +1,73 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
+from sqlalchemy import and_, select
+
 from .agent import run_until_event
+from .db import get_engine
 from .event_bus import publish_event
+from .normalize import normalize_entity
+from .pit_schema import pit_observations
 from .review_queue import release_review_task, validate_review_lease
 from .reviews import submit_review
+from .schema import review_tasks
+
+
+def _task_scope(task_id: int) -> dict[str, Any]:
+    with get_engine().connect() as conn:
+        row = conn.execute(
+            select(
+                review_tasks.c.task_type,
+                review_tasks.c.subject_type,
+                review_tasks.c.subject_key,
+                review_tasks.c.payload_json,
+                review_tasks.c.priority,
+            ).where(review_tasks.c.id == task_id)
+        ).first()
+        if not row:
+            return {"observation_ids": [], "force_full": True}
+        payload = json.loads(str(row.payload_json) or "{}")
+        observation_ids: set[int] = set()
+        if payload.get("observation_id"):
+            observation_ids.add(int(payload["observation_id"]))
+        if row.subject_type == "observation" and str(row.subject_key).isdigit():
+            observation_ids.add(int(row.subject_key))
+
+        address = dict(payload.get("address") or {})
+        if address.get("locality") or address.get("settlement"):
+            keys = {
+                key: normalize_entity(str(address.get(key, "")))
+                for key in ("locality", "district", "settlement", "street")
+            }
+            conditions = [
+                pit_observations.c.locality_key == keys["locality"],
+                pit_observations.c.district_key == keys["district"],
+                pit_observations.c.settlement_key == keys["settlement"],
+                pit_observations.c.street_key == keys["street"],
+            ]
+            observation_ids.update(
+                int(value)
+                for value in conn.scalars(
+                    select(pit_observations.c.id).where(and_(*conditions))
+                )
+            )
+
+    task_type = str(row.task_type)
+    force_full = task_type == "directive_challenge" or int(row.priority) >= 110
+    if not observation_ids and task_type not in {
+        "mapping_conflict",
+        "duplicate_observation",
+        "missing_context",
+        "import_issue",
+    }:
+        force_full = True
+    return {
+        "observation_ids": sorted(observation_ids),
+        "force_full": force_full,
+        "task_type": task_type,
+    }
 
 
 def submit_review_and_update_agent(
@@ -21,6 +83,7 @@ def submit_review_and_update_agent(
     if lease_token:
         validate_review_lease(task_id, reviewer, lease_token)
 
+    scope = _task_scope(task_id)
     result = submit_review(task_id, reviewer, selection, is_admin)
     if not result.get("applied"):
         return result
@@ -34,6 +97,9 @@ def submit_review_and_update_agent(
             "task_id": task_id,
             "decision_id": decision_id,
             "reviewer": reviewer,
+            "observation_ids": scope["observation_ids"],
+            "force_full": scope["force_full"],
+            "task_type": scope["task_type"],
         },
         deduplication_key=f"decision:{decision_id}",
     )
