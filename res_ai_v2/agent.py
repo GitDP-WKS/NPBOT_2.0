@@ -6,6 +6,7 @@ from typing import Any
 
 from .analyzer import analyze_database
 from .event_bus import AgentEvent, claim_next_event, complete_event, fail_event, worker_identity
+from .incremental_analyzer import analyze_changed_addresses
 
 EventHandler = Callable[[AgentEvent], dict[str, Any]]
 
@@ -18,28 +19,27 @@ class AgentCycleResult:
     results: list[dict[str, Any]]
 
 
-def _handle_file_imported(event: AgentEvent) -> dict[str, Any]:
-    analysis = analyze_database()
-    return {
-        "event": event.event_type,
-        "source_file": event.subject_key,
-        "analysis": analysis,
-    }
+def _address_ids(event: AgentEvent) -> list[int]:
+    values = event.payload.get("address_ids") or []
+    return sorted({int(value) for value in values if str(value).isdigit() and int(value) > 0})
 
 
-def _handle_knowledge_changed(event: AgentEvent) -> dict[str, Any]:
-    analysis = analyze_database()
+def _analyze_event(event: AgentEvent) -> dict[str, Any]:
+    ids = _address_ids(event)
+    analysis = analyze_changed_addresses(ids) if ids else analyze_database()
     return {
         "event": event.event_type,
         "subject": event.subject_key,
+        "scope": "changed_addresses" if ids else "full_database",
+        "address_ids": ids,
         "analysis": analysis,
     }
 
 
 HANDLERS: dict[str, EventHandler] = {
-    "file_imported": _handle_file_imported,
-    "address_changed": _handle_knowledge_changed,
-    "human_confirmed": _handle_knowledge_changed,
+    "file_imported": _analyze_event,
+    "address_changed": _analyze_event,
+    "human_confirmed": _analyze_event,
 }
 
 
