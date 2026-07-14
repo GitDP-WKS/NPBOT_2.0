@@ -6,13 +6,12 @@ from typing import Any
 
 from sqlalchemy import select
 
-from .analyzer import analyze_database
 from .agent_monitor import recover_stale_events
 from .config import load_settings
 from .db import get_engine, get_setting, set_setting
 from .event_bus import AgentEvent, claim_next_event, complete_event, fail_event, publish_event, worker_identity
 from .event_schema import agent_events
-from .incremental_analyzer import analyze_changed_addresses
+from .knowledge_agent import rebuild_knowledge
 from .modeling import train_candidate
 
 EventHandler = Callable[[AgentEvent], dict[str, Any]]
@@ -26,8 +25,8 @@ class AgentCycleResult:
     results: list[dict[str, Any]]
 
 
-def _address_ids(event: AgentEvent) -> list[int]:
-    values = event.payload.get("address_ids") or []
+def _positive_ids(event: AgentEvent, key: str) -> list[int]:
+    values = event.payload.get(key) or []
     return sorted({int(value) for value in values if str(value).isdigit() and int(value) > 0})
 
 
@@ -52,15 +51,36 @@ def _schedule_training_if_needed(event: AgentEvent) -> int | None:
     )
 
 
-def _analyze_event(event: AgentEvent) -> dict[str, Any]:
-    ids = _address_ids(event)
-    analysis = analyze_changed_addresses(ids) if ids else analyze_database()
+def _pit_event(event: AgentEvent) -> dict[str, Any]:
+    observation_ids = _positive_ids(event, "observation_ids")
+    analysis = rebuild_knowledge(
+        observation_ids=observation_ids or None,
+        full_rebuild=not bool(observation_ids),
+        trigger_type=event.event_type,
+        trigger_key=event.subject_key,
+    )
     training_event_id = _schedule_training_if_needed(event)
     return {
         "event": event.event_type,
         "subject": event.subject_key,
-        "scope": "changed_addresses" if ids else "full_database",
-        "address_ids": ids,
+        "scope": "changed_observations" if observation_ids else "full_pit",
+        "observation_ids": observation_ids,
+        "analysis": analysis,
+        "training_event_id": training_event_id,
+    }
+
+
+def _human_event(event: AgentEvent) -> dict[str, Any]:
+    analysis = rebuild_knowledge(
+        full_rebuild=True,
+        trigger_type=event.event_type,
+        trigger_key=event.subject_key,
+    )
+    training_event_id = _schedule_training_if_needed(event)
+    return {
+        "event": event.event_type,
+        "subject": event.subject_key,
+        "scope": "full_pit",
         "analysis": analysis,
         "training_event_id": training_event_id,
     }
@@ -70,8 +90,12 @@ def _full_analysis_event(event: AgentEvent) -> dict[str, Any]:
     return {
         "event": event.event_type,
         "subject": event.subject_key,
-        "scope": "full_database",
-        "analysis": analyze_database(),
+        "scope": "full_pit",
+        "analysis": rebuild_knowledge(
+            full_rebuild=True,
+            trigger_type=event.event_type,
+            trigger_key=event.subject_key,
+        ),
     }
 
 
@@ -91,10 +115,12 @@ def _train_candidate_event(event: AgentEvent) -> dict[str, Any]:
 
 
 HANDLERS: dict[str, EventHandler] = {
-    "file_imported": _analyze_event,
-    "address_changed": _analyze_event,
-    "human_confirmed": _analyze_event,
+    "file_imported": _pit_event,
+    "pit_ingested": _pit_event,
+    "address_changed": _human_event,
+    "human_confirmed": _human_event,
     "full_analysis_requested": _full_analysis_event,
+    "daily_full_audit": _full_analysis_event,
     "training_requested": _train_candidate_event,
 }
 
@@ -163,9 +189,7 @@ def run_until_event(
     results: list[dict[str, Any]] = []
     for _ in range(max(1, max_events)):
         with get_engine().connect() as conn:
-            status = conn.scalar(
-                select(agent_events.c.status).where(agent_events.c.id == event_id)
-            )
+            status = conn.scalar(select(agent_events.c.status).where(agent_events.c.id == event_id))
         if status in {"completed", "failed"}:
             break
         cycle = run_agent_cycle(max_events=1, worker_id=worker_id)
@@ -178,9 +202,7 @@ def run_until_event(
 
     target = next((item for item in results if item.get("event_id") == event_id), None)
     with get_engine().connect() as conn:
-        final_status = conn.scalar(
-            select(agent_events.c.status).where(agent_events.c.id == event_id)
-        )
+        final_status = conn.scalar(select(agent_events.c.status).where(agent_events.c.id == event_id))
     return {
         "processed": processed,
         "completed": completed,
