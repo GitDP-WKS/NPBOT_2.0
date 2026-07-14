@@ -31,14 +31,14 @@ def get_engine() -> Engine:
         sqlite_path = cfg.database_url.removeprefix("sqlite:///")
         if sqlite_path and sqlite_path != ":memory:":
             Path(sqlite_path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
-    engine = create_engine(cfg.database_url, **kwargs)
-    return engine
+    return create_engine(cfg.database_url, **kwargs)
 
 
 @lru_cache(maxsize=1)
 def initialize_database() -> None:
     engine = get_engine()
     from .migrations import run_migrations
+    from .pit_bootstrap import BOOTSTRAP_SETTING, bootstrap_current_knowledge
 
     run_migrations(engine)
     now = utcnow()
@@ -61,13 +61,29 @@ def initialize_database() -> None:
                         updated_at=now,
                     )
                 )
-        if not conn.execute(select(settings.c.key).where(settings.c.key == "data_version")).first():
-            conn.execute(insert(settings).values(key="data_version", value="1", updated_at=now))
-        if not conn.execute(select(settings.c.key).where(settings.c.key == "human_decisions_since_training")).first():
+        defaults = {
+            "data_version": "1",
+            "human_decisions_since_training": "0",
+        }
+        for key, value in defaults.items():
+            if not conn.execute(select(settings.c.key).where(settings.c.key == key)).first():
+                conn.execute(
+                    insert(settings).values(
+                        key=key,
+                        value=value,
+                        updated_at=now,
+                    )
+                )
+
+        bootstrapped = conn.execute(
+            select(settings.c.value).where(settings.c.key == BOOTSTRAP_SETTING)
+        ).first()
+        if not bootstrapped:
+            result = bootstrap_current_knowledge(conn, now)
             conn.execute(
                 insert(settings).values(
-                    key="human_decisions_since_training",
-                    value="0",
+                    key=BOOTSTRAP_SETTING,
+                    value=f"done:{result['observations']}:{result['directives']}",
                     updated_at=now,
                 )
             )
@@ -85,9 +101,19 @@ def set_setting(key: str, value: Any) -> None:
     now = utcnow()
     with get_engine().begin() as conn:
         if conn.execute(select(settings.c.key).where(settings.c.key == key)).first():
-            conn.execute(update(settings).where(settings.c.key == key).values(value=str(value), updated_at=now))
+            conn.execute(
+                update(settings)
+                .where(settings.c.key == key)
+                .values(value=str(value), updated_at=now)
+            )
         else:
-            conn.execute(insert(settings).values(key=key, value=str(value), updated_at=now))
+            conn.execute(
+                insert(settings).values(
+                    key=key,
+                    value=str(value),
+                    updated_at=now,
+                )
+            )
 
 
 def bump_data_version() -> int:
