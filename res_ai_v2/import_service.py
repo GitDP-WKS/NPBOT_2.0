@@ -10,7 +10,7 @@ from .domain_ingest import reconcile_domain_evidence
 from .event_bus import publish_event
 from .importer import ImportPlan, canonical_row_key
 from .normalize import row_hash, sha256_parts, stable_json
-from .pit_store import ingest_pit_rows, observation_key
+from .pit_store import ingest_pit_rows
 from .repositories import audit
 from .schema import source_files, source_rows
 from .structure import canonical_executor
