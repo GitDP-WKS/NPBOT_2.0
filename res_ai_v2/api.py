@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from .agent import run_agent_cycle
 from .config import load_settings
 from .db import initialize_database, storage_name
+from .diagnostics import run_diagnostics
 from .event_bus import queue_status
 from .import_service import import_plan
 from .importer import inspect_excel
@@ -79,6 +80,7 @@ def system_status() -> dict[str, Any]:
         "storage": storage_name(),
         "database": dashboard(),
         "event_queue": queue_status(),
+        "diagnostics": run_diagnostics(),
     }
 
 
