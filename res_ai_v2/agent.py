@@ -5,8 +5,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from .analyzer import analyze_database
-from .event_bus import AgentEvent, claim_next_event, complete_event, fail_event, worker_identity
+from .config import load_settings
+from .db import get_setting, set_setting
+from .event_bus import AgentEvent, claim_next_event, complete_event, fail_event, publish_event, worker_identity
 from .incremental_analyzer import analyze_changed_addresses
+from .modeling import train_candidate
 
 EventHandler = Callable[[AgentEvent], dict[str, Any]]
 
@@ -24,15 +27,46 @@ def _address_ids(event: AgentEvent) -> list[int]:
     return sorted({int(value) for value in values if str(value).isdigit() and int(value) > 0})
 
 
+def _schedule_training_if_needed(event: AgentEvent) -> int | None:
+    if event.event_type != "human_confirmed":
+        return None
+    decisions = int(get_setting("human_decisions_since_training", "0"))
+    threshold = load_settings().retrain_after_human_decisions
+    if decisions < threshold:
+        return None
+    return publish_event(
+        "training_requested",
+        "model",
+        "candidate",
+        {"human_decisions": decisions, "threshold": threshold},
+        deduplication_key=f"decisions:{decisions}",
+    )
+
+
 def _analyze_event(event: AgentEvent) -> dict[str, Any]:
     ids = _address_ids(event)
     analysis = analyze_changed_addresses(ids) if ids else analyze_database()
+    training_event_id = _schedule_training_if_needed(event)
     return {
         "event": event.event_type,
         "subject": event.subject_key,
         "scope": "changed_addresses" if ids else "full_database",
         "address_ids": ids,
         "analysis": analysis,
+        "training_event_id": training_event_id,
+    }
+
+
+def _train_candidate_event(event: AgentEvent) -> dict[str, Any]:
+    result = train_candidate(actor="Агент РЭС AI")
+    set_setting("human_decisions_since_training", "0")
+    return {
+        "event": event.event_type,
+        "version": result["version"],
+        "gate_passed": result["gate_passed"],
+        "metrics": result["metrics"],
+        "published": False,
+        "message": "Кандидат подготовлен. Публикация выполняется администратором.",
     }
 
 
@@ -40,6 +74,7 @@ HANDLERS: dict[str, EventHandler] = {
     "file_imported": _analyze_event,
     "address_changed": _analyze_event,
     "human_confirmed": _analyze_event,
+    "training_requested": _train_candidate_event,
 }
 
 
