@@ -82,7 +82,7 @@ def submit_review_and_update_agent(
     decision_id = int(result["decision_id"])
     full_rebuild = is_fundamental_decision(normalized_selection)
     event_id = publish_event(
-        "fundamental_rule_changed" if full_rebuild else "human_confirmed",
+        "human_confirmed",
         "review_decision",
         str(decision_id),
         {
