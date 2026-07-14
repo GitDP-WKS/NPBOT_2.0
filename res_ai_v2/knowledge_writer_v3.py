@@ -2,24 +2,76 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import insert, update
+from sqlalchemy import delete, insert, select, update
 
 from .db import get_engine, utcnow
 from .domain_writer import write_domain_outputs
 from .knowledge_plan import AGENT_TASK_TYPES, KnowledgePlan
-from .knowledge_writer import (
-    _chunks,
-    _clear_working_knowledge,
-    _insert_mappings,
-    _replace_scope,
-    _upsert_addresses,
-)
+from .knowledge_writer import _chunks, _clear_working_knowledge, _upsert_addresses
 from .normalize import sha256_parts, stable_json
 from .pit_schema import pit_observations
 from .review_helpers import _apply
 from .review_policy import CONDITIONAL_TYPES, NO_SELECTION_TYPES
 from .schema import address_mappings, mapping_evidence, review_decisions, text_examples
 from .task_sync import sync_review_tasks_in_connection
+
+
+def _replace_scope_bulk(conn, address_ids: list[int]) -> None:
+    for batch in _chunks(sorted(set(address_ids))):
+        mapping_ids = [
+            int(value)
+            for value in conn.scalars(
+                select(address_mappings.c.id).where(
+                    address_mappings.c.address_id.in_(batch)
+                )
+            )
+        ]
+        if mapping_ids:
+            conn.execute(
+                delete(mapping_evidence).where(mapping_evidence.c.mapping_id.in_(mapping_ids))
+            )
+        conn.execute(delete(text_examples).where(text_examples.c.address_id.in_(batch)))
+        conn.execute(delete(address_mappings).where(address_mappings.c.address_id.in_(batch)))
+
+
+def _insert_mappings_bulk(
+    conn,
+    plan: KnowledgePlan,
+    address_ids: dict[str, int],
+) -> dict[tuple[int, str], int]:
+    now = utcnow()
+    rows = [
+        {
+            "address_id": address_ids[spec.address_key],
+            "res_name": spec.res_name,
+            "branch_name": spec.branch_name,
+            "status": spec.status,
+            "source_confidence": spec.confidence,
+            "human_confirmations": 0,
+            "active": True,
+            "created_at": now,
+            "updated_at": now,
+        }
+        for spec in plan.mappings
+    ]
+    for batch in _chunks(rows):
+        if batch:
+            conn.execute(insert(address_mappings), batch)
+    result: dict[tuple[int, str], int] = {}
+    for batch in _chunks(list(address_ids.values())):
+        result.update(
+            {
+                (int(row.address_id), str(row.res_name)): int(row.id)
+                for row in conn.execute(
+                    select(
+                        address_mappings.c.id,
+                        address_mappings.c.address_id,
+                        address_mappings.c.res_name,
+                    ).where(address_mappings.c.address_id.in_(batch))
+                )
+            }
+        )
+    return result
 
 
 def _insert_explainable_evidence(
@@ -82,14 +134,18 @@ def _apply_status_directives(
     address_ids: dict[str, int],
 ) -> None:
     now = utcnow()
+    processed: set[int] = set()
     for spec in plan.mappings:
+        address_id = address_ids[spec.address_key]
+        if address_id in processed:
+            continue
+        processed.add(address_id)
         directive = directives.get(sha256_parts(["mapping_conflict", spec.address_key]))
         if not directive:
             continue
         decision_type = str(
             (directive.get("selection") or {}).get("decision_type", "confirmed")
         )
-        address_id = address_ids[spec.address_key]
         query = address_mappings.c.address_id == address_id
         if decision_type in CONDITIONAL_TYPES:
             conn.execute(
@@ -177,8 +233,8 @@ def write_knowledge_v3(
             _clear_working_knowledge(conn)
         address_ids = _upsert_addresses(conn, plan)
         if not full_rebuild:
-            _replace_scope(conn, list(address_ids.values()), False)
-        mapping_ids = _insert_mappings(conn, plan, address_ids)
+            _replace_scope_bulk(conn, list(address_ids.values()))
+        mapping_ids = _insert_mappings_bulk(conn, plan, address_ids)
         _insert_explainable_evidence(conn, plan, address_ids, mapping_ids)
         _apply_status_directives(conn, plan, directives, address_ids)
         domain_result = write_domain_outputs(
