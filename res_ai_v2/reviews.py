@@ -6,7 +6,7 @@ from typing import Any
 from sqlalchemy import delete, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
-from .db import bump_data_version, get_engine, initialize_database, utcnow
+from .db import bump_data_version, get_engine, get_setting, initialize_database, utcnow
 from .event_bus import publish_event
 from .normalize import normalize_text, sha256_parts, stable_json
 from .pit_schema import knowledge_directives
@@ -20,11 +20,7 @@ def submit_review(
     selection: dict[str, Any],
     is_admin: bool,
 ) -> dict[str, Any]:
-    """Сохраняет одно решение как директиву агенту.
-
-    Человек не меняет рабочую базу. После ответа задание закрывается, а агент
-    перестраивает затронутые знания по этой директиве.
-    """
+    """Сохраняет одно решение как директиву агенту."""
     actor = " ".join(reviewer.strip().split())
     reviewer_key = normalize_text(reviewer)
     if not reviewer_key:
@@ -35,6 +31,7 @@ def submit_review(
     task_type = ""
     decision_id = 0
     directive_id = 0
+    directive_version = int(get_setting("data_version", "1")) + 1
 
     with get_engine().begin() as conn:
         row = conn.execute(
@@ -96,6 +93,7 @@ def submit_review(
                     subject_key=str(task.get("subject_key", task_id)),
                     selection_json=encoded,
                     actor=actor,
+                    source_version=directive_version,
                     active=True,
                     created_at=now,
                     revoked_at=None,
