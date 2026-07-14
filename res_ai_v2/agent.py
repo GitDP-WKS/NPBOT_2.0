@@ -38,12 +38,17 @@ def _schedule_training_if_needed(event: AgentEvent) -> int | None:
     threshold = load_settings().retrain_after_human_decisions
     if decisions < threshold:
         return None
+    data_version = get_setting("data_version", "1")
     return publish_event(
         "training_requested",
         "model",
         "candidate",
-        {"human_decisions": decisions, "threshold": threshold},
-        deduplication_key=f"decisions:{decisions}",
+        {
+            "human_decisions": decisions,
+            "threshold": threshold,
+            "data_version": data_version,
+        },
+        deduplication_key=f"decisions:{decisions}:data:{data_version}",
     )
 
 
