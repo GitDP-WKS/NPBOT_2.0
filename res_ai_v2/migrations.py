@@ -7,6 +7,7 @@ from .db import utcnow
 from .event_schema import agent_effects, agent_events, agent_runs  # noqa: F401
 from .pit_schema import (  # noqa: F401
     agent_daily_runs,
+    agent_locks,
     knowledge_directives,
     knowledge_generations,
     pit_observations,
@@ -15,7 +16,7 @@ from .pit_schema import (  # noqa: F401
 )
 from .schema import metadata, schema_migrations
 
-LATEST_SCHEMA_VERSION = 3
+LATEST_SCHEMA_VERSION = 4
 
 
 def run_migrations(engine: Engine) -> int:
@@ -31,6 +32,7 @@ def run_migrations(engine: Engine) -> int:
             1: "Начальная схема РЭС AI 2.0",
             2: "Событийная очередь и журнал запусков агента",
             3: "Сырая яма, директивы агента, поколения знаний и аренда заданий",
+            4: "Межпроцессные замки общей синхронизации агента",
         }
         for version, description in migrations.items():
             if version in applied:
