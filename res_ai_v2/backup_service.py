@@ -6,6 +6,7 @@ from typing import Any
 
 from sqlalchemy import insert, select
 
+from . import restore_agent  # noqa: F401
 from .agent import run_until_event
 from .db import get_engine, initialize_database, utcnow
 from .domain_schema import (
