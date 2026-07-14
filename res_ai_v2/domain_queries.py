@@ -9,6 +9,8 @@ from sqlalchemy.engine import Connection
 from .domain_schema import canonical_observations, evidence_claims, source_evidence
 from .pit_schema import pit_observations
 
+LARGE_SCOPE = 10_000
+
 
 def load_domain_observations(
     conn: Connection,
@@ -72,7 +74,8 @@ def load_domain_observations(
         ids = sorted({int(value) for value in observation_ids if int(value) > 0})
         if not ids:
             return []
-        query = query.where(pit_observations.c.id.in_(ids))
+        if len(ids) < LARGE_SCOPE:
+            query = query.where(pit_observations.c.id.in_(ids))
 
     result: list[dict[str, Any]] = []
     for row in conn.execute(query):
