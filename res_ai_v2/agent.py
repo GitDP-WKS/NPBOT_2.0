@@ -4,11 +4,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from sqlalchemy import select
+
 from .analyzer import analyze_database
 from .agent_monitor import recover_stale_events
 from .config import load_settings
-from .db import get_setting, set_setting
+from .db import get_engine, get_setting, set_setting
 from .event_bus import AgentEvent, claim_next_event, complete_event, fail_event, publish_event, worker_identity
+from .event_schema import agent_events
 from .incremental_analyzer import analyze_changed_addresses
 from .modeling import train_candidate
 
@@ -142,3 +145,42 @@ def run_agent_cycle(*, max_events: int = 20, worker_id: str | None = None) -> Ag
         failed=failed,
         results=results,
     )
+
+
+def run_until_event(
+    event_id: int,
+    *,
+    max_events: int = 200,
+    worker_id: str | None = None,
+) -> dict[str, Any]:
+    """Обрабатывает очередь по порядку, пока целевое событие не завершится."""
+    processed = completed = failed = 0
+    results: list[dict[str, Any]] = []
+    for _ in range(max(1, max_events)):
+        with get_engine().connect() as conn:
+            status = conn.scalar(
+                select(agent_events.c.status).where(agent_events.c.id == event_id)
+            )
+        if status in {"completed", "failed"}:
+            break
+        cycle = run_agent_cycle(max_events=1, worker_id=worker_id)
+        processed += cycle.processed
+        completed += cycle.completed
+        failed += cycle.failed
+        results.extend(cycle.results)
+        if cycle.processed == 0:
+            break
+
+    target = next((item for item in results if item.get("event_id") == event_id), None)
+    with get_engine().connect() as conn:
+        final_status = conn.scalar(
+            select(agent_events.c.status).where(agent_events.c.id == event_id)
+        )
+    return {
+        "processed": processed,
+        "completed": completed,
+        "failed": failed,
+        "target_status": str(final_status or "unknown"),
+        "target_result": target,
+        "results": results,
+    }
