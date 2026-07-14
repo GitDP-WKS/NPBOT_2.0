@@ -5,11 +5,13 @@ import streamlit as st
 
 from .agent import run_agent_cycle
 from .agent_monitor import agent_status, recent_agent_events, recent_agent_runs, recover_stale_events
+from .diagnostics import run_diagnostics
 
 
 def page_agent_center() -> None:
     st.header("Центр управления агентом")
-    status = agent_status()
+    diagnostics = run_diagnostics()
+    status = diagnostics["agent"]
     counts = status["counts"]
 
     cols = st.columns(5)
@@ -19,10 +21,20 @@ def page_agent_center() -> None:
     cols[3].metric("Завершены", counts.get("completed", 0))
     cols[4].metric("Ошибки", counts.get("failed", 0))
 
-    if status["healthy"]:
-        st.success("Агент работает штатно.")
+    if diagnostics["healthy"]:
+        st.success("Система и агент работают штатно.")
     else:
-        st.warning("Есть события, требующие внимания администратора.")
+        st.warning("Самодиагностика обнаружила проблемы.")
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {"Проблема": item["title"], "Количество": item["count"]}
+                    for item in diagnostics["problems"]
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
 
     left, right = st.columns(2)
     if left.button("Обработать очередь сейчас", type="primary", use_container_width=True):
