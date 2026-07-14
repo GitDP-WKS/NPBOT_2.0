@@ -48,22 +48,18 @@ def _preview(plan) -> pd.DataFrame:
 
 def page_upload() -> None:
     st.header("Загрузка")
-    st.write(
-        "Загрузите любой Excel. Система сама ищет заголовки и определяет назначение столбцов по названиям и содержимому."
-    )
+    st.caption("Загрузите Excel. Столбцы и данные система распознает сама.")
     uploaded = st.file_uploader("Excel-файл", type=["xlsx", "xls"])
     if not uploaded:
         return
-    content = uploaded.getvalue()
     try:
-        plan = inspect_excel(content, uploaded.name)
+        plan = inspect_excel(uploaded.getvalue(), uploaded.name)
     except Exception as exc:
         st.error(str(exc))
         return
-    st.success(f"Распознано строк: {plan.detected_rows}. Тип данных: {source_kind_label(plan.source_kind)}.")
-    if plan.warnings:
-        for warning in plan.warnings:
-            st.warning(warning)
+    st.success(f"Распознано: {plan.detected_rows}. Тип: {source_kind_label(plan.source_kind)}.")
+    for warning in plan.warnings:
+        st.warning(warning)
     for sheet in plan.sheets:
         with st.expander(f"Лист: {sheet.sheet_name}", expanded=bool(sheet.warnings)):
             rows = [
@@ -76,22 +72,21 @@ def page_upload() -> None:
             ]
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
     st.dataframe(_preview(plan), use_container_width=True, hide_index=True)
-    if st.button("Сохранить в постоянную базу и проанализировать", type="primary", use_container_width=True):
+    if st.button("Загрузить", type="primary", use_container_width=True):
         try:
-            with st.spinner("Сохраняю данные и формирую сомнения..."):
-                result = import_plan(plan)
+            with st.spinner("Сохраняю файл..."):
+                result = import_plan(plan, wait_for_agent=False)
         except Exception as exc:
             st.error(f"Ошибка загрузки: {exc}")
             return
         if result["already_loaded"]:
-            st.info("Этот файл уже был загружен. Счетчики и обучение не изменены.")
-        else:
-            cols = st.columns(4)
-            cols[0].metric("Распознано", result["seen"])
-            cols[1].metric("Добавлено", result["imported"])
-            cols[2].metric("Дубли внутри файла", result["duplicates"])
-            cols[3].metric("Требуют уточнения", result["issues"])
-            st.success("Данные сохранены в Neon и автоматически проанализированы агентом.")
+            st.info("Этот файл уже загружен. Данные не изменены.")
+            return
+        cols = st.columns(3)
+        cols[0].metric("Строк", result["seen"])
+        cols[1].metric("Новых наблюдений", result["imported"])
+        cols[2].metric("Повторов", result["duplicates"])
+        st.success("Файл сохранен. Агент анализирует его в фоне.")
 
 
 def page_knowledge() -> None:
@@ -142,7 +137,7 @@ def page_settings() -> None:
     st.header("Настройки")
     st.subheader("Резервная копия")
     st.write(
-        "Копия содержит базу знаний, источники, задания, голоса, решения, модели, журнал и очередь агента."
+        "Копия содержит базу знаний, источники, задания, решения, модели и журнал агента."
     )
     st.download_button(
         "Скачать полную резервную копию",
@@ -150,7 +145,4 @@ def page_settings() -> None:
         "res_ai_v2_backup.json",
         "application/json",
         use_container_width=True,
-    )
-    st.info(
-        "Перенос данных старой версии убран из ежедневного интерфейса. Он не запускается случайным нажатием и не изменяет рабочую базу."
     )
