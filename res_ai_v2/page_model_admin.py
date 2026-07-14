@@ -6,55 +6,123 @@ import streamlit as st
 from .analyzer import analyze_database
 from .modeling import list_model_versions, publish_candidate, rollback_model, train_candidate
 from .quality import quality_details
+from .ui_labels import status_label, task_type_label
 
 
 def _metrics(result) -> None:
-    metrics = result["metrics"]; cols = st.columns(4)
-    cols[0].metric("Контрольная точность", f"{metrics['accuracy']*100:.2f}%"); cols[1].metric("Macro-F1", f"{metrics['macro_f1']*100:.2f}%"); cols[2].metric("Примеров", metrics["rows"]); cols[3].metric("Классов РЭС", metrics["classes"])
-    if result.get("gate_passed"): st.success("Кандидат прошел порог качества.")
+    metrics = result["metrics"]
+    cols = st.columns(4)
+    cols[0].metric("Контрольная точность", f"{metrics['accuracy'] * 100:.2f}%")
+    cols[1].metric("Средняя оценка по всем РЭС", f"{metrics['macro_f1'] * 100:.2f}%")
+    cols[2].metric("Примеров", metrics["rows"])
+    cols[3].metric("РЭС в обучении", metrics["classes"])
+    if result.get("gate_passed"):
+        st.success("Кандидат прошел проверку качества.")
     else:
-        for reason in result.get("gate_reasons", []): st.warning(reason)
-    per_res = [{"РЭС": res, "Точность": round(values["precision"]*100,2), "Полнота": round(values["recall"]*100,2), "F1": round(values["f1"]*100,2), "Примеров": values["support"]} for res, values in metrics.get("per_res", {}).items()]
-    if per_res: st.dataframe(pd.DataFrame(per_res).sort_values("Полнота"), use_container_width=True, hide_index=True)
-    if result.get("confusion"): st.subheader("Наиболее частые ошибки"); st.dataframe(pd.DataFrame(result["confusion"]), use_container_width=True, hide_index=True)
+        for reason in result.get("gate_reasons", []):
+            st.warning(reason)
+    per_res = [
+        {
+            "РЭС": res,
+            "Точность ответов": round(values["precision"] * 100, 2),
+            "Найдено правильных случаев": round(values["recall"] * 100, 2),
+            "Итоговая оценка": round(values["f1"] * 100, 2),
+            "Примеров": values["support"],
+        }
+        for res, values in metrics.get("per_res", {}).items()
+    ]
+    if per_res:
+        st.dataframe(
+            pd.DataFrame(per_res).sort_values("Найдено правильных случаев"),
+            use_container_width=True,
+            hide_index=True,
+        )
+    if result.get("confusion"):
+        st.subheader("Наиболее частые ошибки")
+        frame = pd.DataFrame(result["confusion"]).rename(
+            columns={"true": "Правильный РЭС", "predicted": "Выбранный моделью РЭС", "count": "Количество ошибок"}
+        )
+        st.dataframe(frame, use_container_width=True, hide_index=True)
 
 
 def page_training() -> None:
     st.header("Анализ и обучение")
-    st.write("Анализ ищет противоречия и недостающий район. Обучение использует только однозначные связи и размеченные тексты; многозначные адреса исключаются.")
+    st.write(
+        "Анализ ищет противоречия и адреса, которым не хватает района. Обучение использует только однозначные связи "
+        "и проверенные тексты. Многозначные адреса в обучение не попадают."
+    )
     a, b, c = st.columns(3)
     if a.button("Проанализировать базу", use_container_width=True):
-        with st.spinner("Проверяю базу..."): result = analyze_database()
-        st.success(f"Сформировано заданий: {result['tasks']}; конфликтов: {result['conflicts']}; без района: {result['missing_context']}.")
-    if b.button("Обучить кандидата", use_container_width=True):
+        with st.spinner("Проверяю базу..."):
+            result = analyze_database()
+        st.success(
+            f"Сформировано заданий: {result['tasks']}; противоречий: {result['conflicts']}; "
+            f"адресов без района: {result['missing_context']}."
+        )
+    if b.button("Обучить новую версию", use_container_width=True):
         try:
-            with st.spinner("Обучаю и проверяю модель..."): st.session_state["last_training"] = train_candidate()
-        except Exception as exc: st.error(str(exc))
-    if c.button("Полный цикл", type="primary", use_container_width=True):
+            with st.spinner("Обучаю и проверяю модель..."):
+                st.session_state["last_training"] = train_candidate()
+        except Exception as exc:
+            st.error(str(exc))
+    if c.button("Проанализировать и обучить", type="primary", use_container_width=True):
         try:
-            with st.spinner("Анализирую базу и обучаю кандидата..."): analyze_database(); st.session_state["last_training"] = train_candidate()
-        except Exception as exc: st.error(str(exc))
-    if st.session_state.get("last_training"): _metrics(st.session_state["last_training"])
+            with st.spinner("Анализирую базу и обучаю новую версию..."):
+                analyze_database()
+                st.session_state["last_training"] = train_candidate()
+        except Exception as exc:
+            st.error(str(exc))
+    if st.session_state.get("last_training"):
+        _metrics(st.session_state["last_training"])
     versions = list_model_versions()
     if versions:
         st.subheader("Версии модели")
-        rows = [{"Версия": row["version"], "Статус": row["status"], "Порог пройден": row["gate_passed"], "Точность": round(row["metrics"].get("accuracy",0)*100,2), "Macro-F1": round(row["metrics"].get("macro_f1",0)*100,2), "Создана": row["created_at"]} for row in versions]
+        rows = [
+            {
+                "Версия": row["version"],
+                "Статус": status_label(row["status"]),
+                "Проверка качества пройдена": "Да" if row["gate_passed"] else "Нет",
+                "Точность": round(row["metrics"].get("accuracy", 0) * 100, 2),
+                "Средняя оценка по всем РЭС": round(row["metrics"].get("macro_f1", 0) * 100, 2),
+                "Создана": row["created_at"],
+            }
+            for row in versions
+        ]
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-        version = st.selectbox("Версия", [row["version"] for row in versions])
+        version = st.selectbox("Выберите версию", [row["version"] for row in versions])
         left, right = st.columns(2)
-        if left.button("Опубликовать кандидата", use_container_width=True):
-            try: publish_candidate(version); st.success("Модель опубликована."); st.rerun()
-            except Exception as exc: st.error(str(exc))
-        if right.button("Откатить рабочую модель к версии", use_container_width=True):
-            try: rollback_model(version); st.success("Рабочая модель переключена."); st.rerun()
-            except Exception as exc: st.error(str(exc))
+        if left.button("Сделать выбранную версию рабочей", use_container_width=True):
+            try:
+                publish_candidate(version)
+                st.success("Выбранная версия стала рабочей.")
+                st.rerun()
+            except Exception as exc:
+                st.error(str(exc))
+        if right.button("Вернуться к выбранной версии", use_container_width=True):
+            try:
+                rollback_model(version)
+                st.success("Рабочая модель переключена на выбранную версию.")
+                st.rerun()
+            except Exception as exc:
+                st.error(str(exc))
 
 
 def page_quality() -> None:
     st.header("Качество")
     values = quality_details()
     st.subheader("Состояние данных")
-    st.dataframe(pd.DataFrame([{"Статус": key, "Записей": value} for key, value in values["mapping_status"].items()]), use_container_width=True, hide_index=True)
+    status_rows = [
+        {"Статус": status_label(key), "Записей": value}
+        for key, value in values["mapping_status"].items()
+    ]
+    st.dataframe(pd.DataFrame(status_rows), use_container_width=True, hide_index=True)
     st.subheader("Открытые задания")
-    st.dataframe(pd.DataFrame([{"Тип": key, "Заданий": value} for key, value in values["open_by_type"].items()]), use_container_width=True, hide_index=True)
-    cols = st.columns(3); cols[0].metric("Загруженных файлов", values["file_count"]); cols[1].metric("Размеченных текстов", values["text_count"]); cols[2].metric("Запусков определения", values["prediction_count"])
+    task_rows = [
+        {"Тип": task_type_label(key), "Заданий": value}
+        for key, value in values["open_by_type"].items()
+    ]
+    st.dataframe(pd.DataFrame(task_rows), use_container_width=True, hide_index=True)
+    cols = st.columns(3)
+    cols[0].metric("Загруженных файлов", values["file_count"])
+    cols[1].metric("Размеченных текстов", values["text_count"])
+    cols[2].metric("Запусков определения", values["prediction_count"])
