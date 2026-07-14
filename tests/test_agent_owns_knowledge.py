@@ -18,6 +18,7 @@ ALLOWED_AGENT_WRITERS = {
     "res_ai_v2/knowledge_writer_v3.py",
     "res_ai_v2/domain_writer.py",
     "res_ai_v2/review_helpers.py",
+    "res_ai_v2/restore_writer.py",
 }
 WRITE_FUNCTIONS = {"insert", "update", "delete"}
 RAW_SQL_WRITE = re.compile(r"\b(insert\s+into|update|delete\s+from)\s+([a-zA-Z0-9_]+)", re.I)
