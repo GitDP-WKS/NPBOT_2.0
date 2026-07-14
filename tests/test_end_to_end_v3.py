@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 from fastapi.testclient import TestClient
-from sqlalchemy import Column, Float, Integer, MetaData, String, Table, Text, insert, select
+from sqlalchemy import Column, Integer, MetaData, String, Table, Text, insert, select
 
 from res_ai_v2.admin_service import request_full_analysis
 from res_ai_v2.agent import run_until_event
@@ -307,7 +307,14 @@ def test_complete_end_to_end_scenario(temp_db, monkeypatch) -> None:
     import_plan(
         make_plan(
             "87" * 32,
-            [{"res": FIRST, "locality": "После копии", "district": "Лаишевский", "source_event_id": "after-backup"}],
+            [
+                {
+                    "res": FIRST,
+                    "locality": "После копии",
+                    "district": "Лаишевский",
+                    "source_event_id": "after-backup",
+                }
+            ],
         )
     )
     restored = request_restore(snapshot, "Сквозной тест", wait_for_agent=True)
