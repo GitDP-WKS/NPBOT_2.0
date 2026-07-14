@@ -16,6 +16,7 @@ from .schema import (
     audit_events,
     mapping_evidence,
     model_versions,
+    prediction_events,
     query_rules,
     review_decisions,
     review_tasks,
