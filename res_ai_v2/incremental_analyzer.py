@@ -6,6 +6,7 @@ from sqlalchemy import and_, or_, select, update
 
 from .db import get_engine, initialize_database, utcnow
 from .knowledge_agent import rebuild_knowledge
+from .normalize import normalize_entity
 from .pit_bootstrap import bootstrap_current_knowledge
 from .pit_schema import pit_observations
 from .schema import address_mappings, addresses, review_tasks
@@ -25,10 +26,14 @@ def _address_rows(address_ids: list[int]) -> list[dict[str, Any]]:
 def _matching_observation_ids(rows: list[dict[str, Any]]) -> list[int]:
     conditions = [
         and_(
-            pit_observations.c.locality_key == str(row.get("locality_key", "")),
-            pit_observations.c.district_key == str(row.get("district_key", "")),
-            pit_observations.c.settlement_key == str(row.get("settlement_key", "")),
-            pit_observations.c.street_key == str(row.get("street_key", "")),
+            pit_observations.c.locality_key
+            == normalize_entity(str(row.get("locality", ""))),
+            pit_observations.c.district_key
+            == normalize_entity(str(row.get("district", ""))),
+            pit_observations.c.settlement_key
+            == normalize_entity(str(row.get("settlement", ""))),
+            pit_observations.c.street_key
+            == normalize_entity(str(row.get("street", ""))),
         )
         for row in rows
     ]
