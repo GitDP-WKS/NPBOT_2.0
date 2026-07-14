@@ -5,6 +5,7 @@ from typing import Any
 from sqlalchemy import delete, insert, select, update
 
 from .db import get_engine, utcnow
+from .domain_schema import mapping_explanations
 from .domain_writer import write_domain_outputs
 from .knowledge_plan import AGENT_TASK_TYPES, KnowledgePlan
 from .knowledge_writer import _chunks, _clear_working_knowledge, _upsert_addresses
@@ -27,6 +28,11 @@ def _replace_scope_bulk(conn, address_ids: list[int]) -> None:
             )
         ]
         if mapping_ids:
+            conn.execute(
+                delete(mapping_explanations).where(
+                    mapping_explanations.c.mapping_id.in_(mapping_ids)
+                )
+            )
             conn.execute(
                 delete(mapping_evidence).where(mapping_evidence.c.mapping_id.in_(mapping_ids))
             )
@@ -230,6 +236,7 @@ def write_knowledge_v3(
     now = utcnow()
     with get_engine().begin() as conn:
         if full_rebuild:
+            conn.execute(delete(mapping_explanations))
             _clear_working_knowledge(conn)
         address_ids = _upsert_addresses(conn, plan)
         if not full_rebuild:
