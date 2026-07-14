@@ -12,15 +12,29 @@ from .ui_common import admin_login, configure, style
 
 def main() -> None:
     st.set_page_config(page_title="РЭС AI 2.0", page_icon="⚡", layout="wide")
-    configure(); initialize_database(); style()
+    configure()
+    style()
     st.title("РЭС AI")
     st.caption("Система определения филиала и РЭС по адресам Республики Татарстан")
+
+    try:
+        initialize_database()
+    except Exception as exc:
+        st.error("Общая база данных недоступна. Работа остановлена, чтобы изменения не сохранялись отдельно на этом компьютере.")
+        st.code(str(exc))
+        st.info("Откройте то же развернутое приложение Streamlit или добавьте DATABASE_URL в его Secrets.")
+        st.stop()
+
     is_admin = admin_login()
     reviewer = "Администратор" if is_admin else st.sidebar.text_input("Проверяющий", placeholder="Фамилия и имя")
     pages = ["Проверка", "Определение"]
-    if is_admin: pages = ["Главная", "Проверка", "Определение", "Загрузка", "База знаний", "Анализ и обучение", "Качество", "Журнал", "Настройки"]
-    st.sidebar.caption(f"Хранилище: {storage_name()}")
+    if is_admin:
+        pages = ["Главная", "Проверка", "Определение", "Загрузка", "База знаний", "Анализ и обучение", "Качество", "Журнал", "Настройки"]
+    st.sidebar.success(f"Общее хранилище: {storage_name()}")
+    st.sidebar.caption("Все компьютеры должны открывать один и тот же адрес приложения Streamlit.")
     page = st.sidebar.radio("Раздел", pages)
     handlers = {"Главная": page_home, "Определение": page_predict, "Загрузка": page_upload, "База знаний": page_knowledge, "Анализ и обучение": page_training, "Качество": page_quality, "Журнал": page_journal, "Настройки": page_settings}
-    if page == "Проверка": page_review(is_admin, reviewer)
-    else: handlers[page]()
+    if page == "Проверка":
+        page_review(is_admin, reviewer)
+    else:
+        handlers[page]()
