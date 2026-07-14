@@ -7,7 +7,7 @@ from uuid import uuid4
 from sqlalchemy import insert, select, update
 
 from .db import bump_data_version, get_engine, get_setting, initialize_database, utcnow
-from .domain_queries import load_domain_observations
+from .domain_queries import LARGE_SCOPE, load_domain_observations
 from .domain_schema import canonical_observations, recalculation_log
 from .knowledge_plan import build_knowledge_plan
 from .knowledge_writer_v3 import write_knowledge_v3
@@ -27,29 +27,43 @@ FUNDAMENTAL_TRIGGERS = {
 }
 
 
+def _chunks(values: list[str], size: int = 1000):
+    for start in range(0, len(values), size):
+        yield values[start : start + size]
+
+
 def _load_scope(observation_ids: list[int] | None) -> list[dict[str, Any]]:
     with get_engine().connect() as conn:
         if observation_ids is None:
             return load_domain_observations(conn)
-        changed = load_domain_observations(conn, observation_ids)
+        ids = sorted({int(value) for value in observation_ids if int(value) > 0})
+        if not ids:
+            return []
+        if len(ids) >= LARGE_SCOPE:
+            return load_domain_observations(conn)
+        changed = load_domain_observations(conn, ids)
         if not changed:
             return []
-        ambiguity_keys = {
-            str(row.get("ambiguity_key", "")) for row in changed if row.get("ambiguity_key")
-        }
+        ambiguity_keys = sorted(
+            {
+                str(row.get("ambiguity_key", ""))
+                for row in changed
+                if row.get("ambiguity_key")
+            }
+        )
         if not ambiguity_keys:
             return changed
-        related_ids = sorted(
-            {
+        related_ids: set[int] = set()
+        for batch in _chunks(ambiguity_keys):
+            related_ids.update(
                 int(value)
                 for value in conn.scalars(
                     select(canonical_observations.c.observation_id).where(
-                        canonical_observations.c.ambiguity_key.in_(ambiguity_keys)
+                        canonical_observations.c.ambiguity_key.in_(batch)
                     )
                 )
-            }
-        )
-        return load_domain_observations(conn, related_ids)
+            )
+        return load_domain_observations(conn, sorted(related_ids))
 
 
 def _load_directives() -> dict[str, dict[str, Any]]:
@@ -121,21 +135,16 @@ def _finish_generation(generation_id: int, status: str, stats: dict[str, Any]) -
         )
 
 
-def _scope_reason(
-    trigger_type: str,
-    full_rebuild: bool,
-    observation_ids: list[int] | None,
-) -> str:
+def _scope_reason(trigger_type: str, full_rebuild: bool, observation_count: int) -> str:
     if full_rebuild:
         if trigger_type == "daily_full_audit":
             return "Ежедневная обязательная сверка всей сырой ямы и фундаментальных правил."
         if trigger_type == "full_analysis_requested":
             return "Администратор запросил полный анализ."
         return "Изменено фундаментальное правило или структура канонизации."
-    count = len(observation_ids or [])
     return (
-        f"Локальный пересчет {count} измененных наблюдений и всех одноименных объектов; "
-        "остальная база не перестраивается."
+        f"Локальный пересчет {observation_count} измененных наблюдений и всех "
+        "одноименных объектов; остальная база не перестраивается."
     )
 
 
@@ -153,7 +162,7 @@ def _log_recalculation(
                 trigger_type=trigger_type,
                 trigger_key=trigger_key,
                 scope="full" if full_rebuild else "local",
-                reason=_scope_reason(trigger_type, full_rebuild, None if full_rebuild else [0] * observation_count),
+                reason=_scope_reason(trigger_type, full_rebuild, observation_count),
                 observation_count=observation_count,
                 generation_id=generation_id,
                 created_at=utcnow(),
@@ -216,7 +225,7 @@ def _rebuild_locked(
             "recalculation_reason": _scope_reason(
                 trigger_type,
                 full_rebuild,
-                observation_ids,
+                len(plan.rows),
             ),
         }
         _finish_generation(generation_id, "completed", stats)
