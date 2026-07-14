@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import insert, select, update
+from sqlalchemy import func, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
 from .db import get_engine, initialize_database, utcnow
@@ -66,7 +66,9 @@ def publish_event(
         if existing:
             return int(existing.id)
         try:
-            return int(conn.execute(insert(agent_events).values(**values)).inserted_primary_key[0])
+            with conn.begin_nested():
+                result = conn.execute(insert(agent_events).values(**values))
+                return int(result.inserted_primary_key[0])
         except IntegrityError:
             existing = conn.execute(
                 select(agent_events.c.id).where(agent_events.c.event_key == event_key)
@@ -203,10 +205,10 @@ def fail_event(event_id: int, error: Exception | str, *, max_attempts: int = 5) 
 
 def queue_status() -> dict[str, int]:
     initialize_database()
+    query = (
+        select(agent_events.c.status, func.count().label("count"))
+        .group_by(agent_events.c.status)
+    )
     with get_engine().connect() as conn:
-        rows = conn.execute(select(agent_events.c.status)).all()
-    result: dict[str, int] = {}
-    for row in rows:
-        key = str(row.status)
-        result[key] = result.get(key, 0) + 1
-    return result
+        rows = conn.execute(query).all()
+    return {str(row.status): int(row.count) for row in rows}
