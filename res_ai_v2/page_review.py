@@ -4,7 +4,7 @@ import streamlit as st
 
 from .repositories import list_review_tasks
 from .review_experience import present_task
-from .reviews import submit_review
+from .review_service import submit_review_and_update_agent
 from .structure import CURRENT_STRUCTURE
 from .ui_common import flash
 
@@ -121,14 +121,16 @@ def page_review(is_admin: bool, reviewer: str) -> None:
             "street": street,
         }
         try:
-            result = submit_review(int(task["id"]), reviewer, selection, is_admin)
+            result = submit_review_and_update_agent(
+                int(task["id"]), reviewer, selection, is_admin
+            )
         except Exception as exc:
             st.error(str(exc))
             return
 
         queue.pop(0)
         st.session_state["flash"] = (
-            "Решение применено к базе знаний."
+            "Решение применено к базе знаний и проверено агентом."
             if result.get("applied")
             else f"Ответ сохранен. Совпадающих решений: {result.get('votes', 0)} из {result.get('required', 3)}."
         )
