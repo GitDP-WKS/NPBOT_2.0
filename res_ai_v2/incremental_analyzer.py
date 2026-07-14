@@ -5,6 +5,7 @@ from typing import Any
 from sqlalchemy import and_, or_, select, update
 
 from .db import get_engine, initialize_database, utcnow
+from .domain_bootstrap import bootstrap_domain_metadata
 from .knowledge_agent import rebuild_knowledge
 from .normalize import normalize_entity
 from .pit_bootstrap import bootstrap_current_knowledge
@@ -82,8 +83,10 @@ def analyze_changed_addresses(address_ids: list[int]) -> dict[str, int]:
             "stale_closed": 0,
         }
 
+    now = utcnow()
     with get_engine().begin() as conn:
-        bootstrap_current_knowledge(conn, utcnow())
+        bootstrap_current_knowledge(conn, now)
+        bootstrap_domain_metadata(conn, now)
         old_mapping_ids = {
             str(value)
             for value in conn.scalars(
