@@ -4,11 +4,12 @@ import streamlit as st
 
 from .db import initialize_database, storage_name
 from .page_agent_admin import page_agent_center
-from .page_data_admin import page_home, page_knowledge, page_settings, page_upload
+from .page_data_admin import page_home, page_knowledge, page_upload
 from .page_journal import page_journal
 from .page_model_admin import page_quality, page_training
 from .page_predict import page_predict
 from .page_review import page_review
+from .page_settings_admin import page_settings
 from .ui_common import admin_login, configure, style
 
 
