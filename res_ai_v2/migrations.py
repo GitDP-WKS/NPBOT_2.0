@@ -4,6 +4,17 @@ from sqlalchemy import insert, select
 from sqlalchemy.engine import Engine
 
 from .db import utcnow
+from .domain_schema import (  # noqa: F401
+    canonical_observations,
+    conditional_rules,
+    evidence_claims,
+    mapping_explanations,
+    quality_snapshots,
+    recalculation_log,
+    source_evidence,
+    source_quality_history,
+    source_registries,
+)
 from .event_schema import agent_effects, agent_events, agent_runs  # noqa: F401
 from .pit_schema import (  # noqa: F401
     agent_daily_runs,
@@ -16,7 +27,7 @@ from .pit_schema import (  # noqa: F401
 )
 from .schema import metadata, schema_migrations
 
-LATEST_SCHEMA_VERSION = 4
+LATEST_SCHEMA_VERSION = 5
 
 
 def run_migrations(engine: Engine) -> int:
@@ -33,6 +44,7 @@ def run_migrations(engine: Engine) -> int:
             2: "Событийная очередь и журнал запусков агента",
             3: "Сырая яма, директивы агента, поколения знаний и аренда заданий",
             4: "Межпроцессные замки общей синхронизации агента",
+            5: "Канонические адреса, происхождение доказательств и объяснения решений",
         }
         for version, description in migrations.items():
             if version in applied:
