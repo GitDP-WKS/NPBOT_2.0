@@ -73,6 +73,21 @@ jobs:
           printf '.venv/bin/python scripts/load_test_50000.py\t%s\n' "$CODE" >> artifacts/ci/commands.tsv
           exit "$CODE"
 
+      - name: Load test 200000
+        if: github.head_ref == 'agent/knowledge-pit-v3' || github.ref_name == 'agent/knowledge-pit-v3'
+        env:
+          DATABASE_URL: "sqlite:////tmp/res-ai-load-200000.db"
+          ADMIN_PASSWORD: "load-admin"
+          RES_AI_ALLOW_SQLITE: "1"
+          RES_AI_DISABLE_BACKGROUND_WORKER: "1"
+        run: |
+          set +e
+          rm -f /tmp/res-ai-load-200000.db
+          .venv/bin/python scripts/load_test_pipeline.py --rows 200000 --output artifacts/ci/load-200000.json 2>&1 | tee artifacts/ci/load-200000.log
+          CODE=${PIPESTATUS[0]}
+          printf '.venv/bin/python scripts/load_test_pipeline.py --rows 200000 --output artifacts/ci/load-200000.json\t%s\n' "$CODE" >> artifacts/ci/commands.tsv
+          exit "$CODE"
+
       - name: Compile
         run: |
           set +e
