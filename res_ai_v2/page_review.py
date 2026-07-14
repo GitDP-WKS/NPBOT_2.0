@@ -129,21 +129,18 @@ def page_review(is_admin: bool, reviewer: str) -> None:
             "street": street,
         }
         try:
-            result = submit_review_and_update_agent(
+            submit_review_and_update_agent(
                 int(task["id"]),
                 reviewer,
                 selection,
                 is_admin,
                 str(task["lease_token"]),
+                wait_for_agent=False,
             )
         except Exception as exc:
             st.error(str(exc))
             return
-        st.session_state["flash"] = (
-            "Решение принято."
-            if result.get("agent_status") == "completed"
-            else "Решение сохранено. Агент завершит обработку автоматически."
-        )
+        st.session_state["flash"] = "Решение принято."
         st.rerun()
 
     if right.button("Пропустить", use_container_width=True):
