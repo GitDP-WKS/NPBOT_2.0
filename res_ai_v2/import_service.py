@@ -4,8 +4,9 @@ from typing import Any
 
 from sqlalchemy import insert, select, update
 
-from .analyzer import analyze_database
+from .agent import run_agent_cycle
 from .db import bump_data_version, get_engine, initialize_database, utcnow
+from .event_bus import publish_event
 from .importer import ImportPlan, canonical_row_key
 from .normalize import normalize_entity, normalize_text, row_hash, sha256_parts, stable_json
 from .repositories import audit, create_or_update_task
@@ -118,7 +119,16 @@ def import_plan(plan: ImportPlan, actor: str = "Администратор") -> 
 
     for task in issues:
         create_or_update_task(**task)
-    analysis = analyze_database()
     bump_data_version()
-    audit(actor, "import_file", "source_file", plan.file_hash, {}, {"file_name": plan.file_name, "rows": len(rows), "unique": len(unique), "issues": len(issues)})
-    return {"already_loaded": False, "seen": len(rows), "imported": len(unique), "duplicates": len(rows) - len(unique), "issues": len(issues), "text_examples": len(fresh_text), "analysis": analysis}
+    event_id = publish_event(
+        "file_imported",
+        "source_file",
+        str(source_id),
+        {"file_hash": plan.file_hash, "address_ids": sorted(set(address_ids.values()))},
+        deduplication_key=plan.file_hash,
+    )
+    cycle = run_agent_cycle(max_events=20)
+    event_result = next((item for item in cycle.results if item.get("event_id") == event_id), None)
+    analysis = ((event_result or {}).get("result") or {}).get("analysis")
+    audit(actor, "import_file", "source_file", plan.file_hash, {}, {"file_name": plan.file_name, "rows": len(rows), "unique": len(unique), "issues": len(issues), "event_id": event_id})
+    return {"already_loaded": False, "seen": len(rows), "imported": len(unique), "duplicates": len(rows) - len(unique), "issues": len(issues), "text_examples": len(fresh_text), "analysis": analysis, "agent": {"processed": cycle.processed, "completed": cycle.completed, "failed": cycle.failed}}
