@@ -14,8 +14,10 @@ def submit_review_and_update_agent(
     selection: dict[str, Any],
     is_admin: bool,
     lease_token: str | None = None,
+    *,
+    wait_for_agent: bool = True,
 ) -> dict[str, Any]:
-    """Принимает одно решение и передает перестройку знаний агенту."""
+    """Принимает решение сразу, а перестройку выполняет агент."""
     if lease_token:
         validate_review_lease(task_id, reviewer, lease_token)
 
@@ -35,9 +37,18 @@ def submit_review_and_update_agent(
         },
         deduplication_key=f"decision:{decision_id}",
     )
-    agent = run_until_event(event_id, max_events=500, worker_id="review-inline")
     if lease_token:
         release_review_task(task_id, reviewer, lease_token)
+
+    if wait_for_agent:
+        agent = run_until_event(event_id, max_events=500, worker_id="review-inline")
+    else:
+        agent = {
+            "target_status": "queued",
+            "processed": 0,
+            "completed": 0,
+            "failed": 0,
+        }
     return {
         **result,
         "agent_event_id": event_id,
