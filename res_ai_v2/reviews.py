@@ -31,7 +31,7 @@ def submit_review(
     task_type = ""
     decision_id = 0
     directive_id = 0
-    directive_version = int(get_setting("data_version", "1")) + 1
+    directive_version = int(get_setting("data_version", "1")) + 2
 
     with get_engine().begin() as conn:
         row = conn.execute(
@@ -83,7 +83,7 @@ def submit_review(
                 )
             ).inserted_primary_key[0]
         )
-        directive_key = sha256_parts(["review", str(task_id), encoded])
+        directive_key = sha256_parts(["review_decision", str(decision_id)])
         directive_id = int(
             conn.execute(
                 insert(knowledge_directives).values(
