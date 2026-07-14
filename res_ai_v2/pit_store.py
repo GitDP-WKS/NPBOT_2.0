@@ -4,7 +4,7 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import func, insert, select, update
+from sqlalchemy import bindparam, func, insert, select, update
 from sqlalchemy.engine import Connection
 
 from .normalize import normalize_entity, normalize_text, sha256_parts
@@ -70,13 +70,10 @@ def ingest_pit_rows(
     source_row_ids: dict[tuple[str, int, str], int],
     now: datetime,
 ) -> dict[str, Any]:
-    """Сохраняет все строки файла в неизменяемую яму.
-
-    Одинаковые наблюдения агрегируются, но каждая исходная строка остается в
-    source_rows и связывается с наблюдением через pit_occurrences.
-    """
+    """Пакетно сохраняет исходные строки в неизменяемую яму."""
     prepared: list[tuple[dict[str, Any], int]] = []
     payload_by_key: dict[str, dict[str, Any]] = {}
+    occurrences_in_file: dict[str, int] = defaultdict(int)
     for row in rows:
         canonical_hash = str(row.get("canonical_hash", ""))
         source_row_id = source_row_ids.get(
@@ -89,7 +86,9 @@ def ingest_pit_rows(
         if not source_row_id:
             continue
         payload = _payload(row, now)
-        payload_by_key.setdefault(str(payload["observation_key"]), payload)
+        key = str(payload["observation_key"])
+        payload_by_key.setdefault(key, payload)
+        occurrences_in_file[key] += 1
         prepared.append((payload, source_row_id))
 
     keys = list(payload_by_key)
@@ -105,6 +104,7 @@ def ingest_pit_rows(
                 )
             }
         )
+    existing_ids = set(observation_ids.values())
 
     missing = [payload for key, payload in payload_by_key.items() if key not in observation_ids]
     for batch in _chunks(missing):
@@ -123,7 +123,7 @@ def ingest_pit_rows(
             }
         )
 
-    occurrence_payload = []
+    occurrence_payload: list[dict[str, Any]] = []
     touched: set[int] = set()
     for payload, source_row_id in prepared:
         observation_id = observation_ids[str(payload["observation_key"])]
@@ -154,18 +154,33 @@ def ingest_pit_rows(
         for item in conn.execute(query):
             counts[int(item.observation_id)] = (int(item.occurrences), int(item.sources))
 
-    for observation_id, (occurrences, sources) in counts.items():
-        conn.execute(
+    update_rows = []
+    for key, observation_id in observation_ids.items():
+        occurrences, sources = counts.get(observation_id, (1, 1))
+        if observation_id not in existing_ids and occurrences_in_file.get(key, 1) == 1:
+            continue
+        update_rows.append(
+            {
+                "b_id": observation_id,
+                "b_occurrences": occurrences,
+                "b_sources": sources,
+                "b_now": now,
+            }
+        )
+    if update_rows:
+        statement = (
             update(pit_observations)
-            .where(pit_observations.c.id == observation_id)
+            .where(pit_observations.c.id == bindparam("b_id"))
             .values(
-                occurrence_count=occurrences,
-                source_count=sources,
+                occurrence_count=bindparam("b_occurrences"),
+                source_count=bindparam("b_sources"),
                 state="new",
-                last_seen_at=now,
-                updated_at=now,
+                last_seen_at=bindparam("b_now"),
+                updated_at=bindparam("b_now"),
             )
         )
+        for batch in _chunks(update_rows):
+            conn.execute(statement, batch)
 
     duplicate_observations = sum(1 for occurrences, _ in counts.values() if occurrences > 1)
     return {
@@ -176,9 +191,14 @@ def ingest_pit_rows(
     }
 
 
-def load_observations(conn: Connection, observation_ids: list[int] | None = None) -> list[dict[str, Any]]:
+def load_observations(
+    conn: Connection,
+    observation_ids: list[int] | None = None,
+) -> list[dict[str, Any]]:
     query = select(pit_observations)
-    if observation_ids:
+    if observation_ids is not None:
+        if not observation_ids:
+            return []
         query = query.where(pit_observations.c.id.in_(sorted(set(observation_ids))))
     return [dict(row._mapping) for row in conn.execute(query)]
 
