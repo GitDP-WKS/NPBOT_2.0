@@ -8,16 +8,17 @@ from .db import get_engine, utcnow
 from .domain_writer import write_domain_outputs
 from .knowledge_plan import AGENT_TASK_TYPES, KnowledgePlan
 from .knowledge_writer import (
-    _apply_directives,
     _chunks,
     _clear_working_knowledge,
     _insert_mappings,
     _replace_scope,
     _upsert_addresses,
 )
-from .normalize import sha256_parts
+from .normalize import sha256_parts, stable_json
 from .pit_schema import pit_observations
-from .schema import mapping_evidence, text_examples
+from .review_helpers import _apply
+from .review_policy import CONDITIONAL_TYPES, NO_SELECTION_TYPES
+from .schema import mapping_evidence, review_decisions, text_examples
 from .task_sync import sync_review_tasks_in_connection
 
 
@@ -74,6 +75,54 @@ def _insert_explainable_evidence(
             conn.execute(insert(text_examples), batch)
 
 
+def _apply_directives_v3(
+    conn,
+    directives: dict[str, dict[str, Any]],
+    directive_keys: set[str] | None,
+) -> int:
+    applied = 0
+    for key, item in directives.items():
+        if directive_keys is not None and key not in directive_keys:
+            continue
+        selection = dict(item["selection"])
+        decision_type = str(selection.get("decision_type", "confirmed"))
+        task = {
+            "id": int(item["task_id"]),
+            "task_key": str(item["task_key"]),
+            "task_type": str(item["task_type"]),
+            "subject_type": str(item["task_subject_type"]),
+            "subject_key": str(item["task_subject_key"]),
+            "title": str(item["title"]),
+            "payload_json": str(item["payload_json"]),
+            "priority": int(item["priority"]),
+        }
+        if decision_type in CONDITIONAL_TYPES | NO_SELECTION_TYPES:
+            before = {"directive_only": True}
+            after = {
+                "decision_type": decision_type,
+                "selected_res": selection.get("selected_res", []),
+                "conditions": selection.get("conditions", []),
+            }
+        else:
+            before, after = _apply(
+                conn,
+                task,
+                selection,
+                str(item["actor"]),
+                1,
+            )
+        conn.execute(
+            update(review_decisions)
+            .where(
+                review_decisions.c.task_id == int(item["task_id"]),
+                review_decisions.c.active.is_(True),
+            )
+            .values(before_json=stable_json(before), after_json=stable_json(after))
+        )
+        applied += 1
+    return applied
+
+
 def write_knowledge_v3(
     plan: KnowledgePlan,
     directives: dict[str, dict[str, Any]],
@@ -98,7 +147,7 @@ def write_knowledge_v3(
             generation_id=generation_id,
             full_rebuild=full_rebuild,
         )
-        directives_applied = _apply_directives(
+        directives_applied = _apply_directives_v3(
             conn,
             directives,
             None if full_rebuild else plan.directive_keys,
