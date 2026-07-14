@@ -4,11 +4,11 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import delete, func, insert, select, update
+from sqlalchemy import bindparam, delete, func, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.engine import Connection
+from sqlalchemy.exc import IntegrityError
 
 from .address_domain import canonicalize_address
 from .domain_schema import (
@@ -68,8 +68,7 @@ def _upsert_canonical(conn: Connection, rows: list[dict[str, Any]]) -> None:
     if not rows:
         return
     dialect = conn.dialect.name
-    unique = {int(item["observation_id"]): item for item in rows}
-    values = list(unique.values())
+    values = list({int(item["observation_id"]): item for item in rows}.values())
     for batch in _chunks(values):
         if dialect == "postgresql":
             statement = postgresql_insert(canonical_observations).values(batch)
@@ -108,14 +107,115 @@ def _upsert_canonical(conn: Connection, rows: list[dict[str, Any]]) -> None:
                         canonical_observations.c.observation_id == item["observation_id"]
                     )
                 )
+                values_to_set = {
+                    key: value for key, value in item.items() if key != "observation_id"
+                }
                 if existing:
                     conn.execute(
                         update(canonical_observations)
                         .where(canonical_observations.c.observation_id == item["observation_id"])
-                        .values(**{key: value for key, value in item.items() if key != "observation_id"})
+                        .values(**values_to_set)
                     )
                 else:
                     conn.execute(insert(canonical_observations).values(**item))
+
+
+def _observation_ids(conn: Connection, keys: list[str]) -> dict[str, int]:
+    result: dict[str, int] = {}
+    for batch in _chunks(keys):
+        result.update(
+            {
+                str(item.observation_key): int(item.id)
+                for item in conn.execute(
+                    select(
+                        pit_observations.c.id,
+                        pit_observations.c.observation_key,
+                    ).where(pit_observations.c.observation_key.in_(batch))
+                )
+            }
+        )
+    return result
+
+
+def _claim_owners(conn: Connection, keys: list[str]) -> dict[str, int | None]:
+    result: dict[str, int | None] = {}
+    for batch in _chunks(keys):
+        result.update(
+            {
+                str(item.evidence_key): (
+                    int(item.first_source_row_id)
+                    if item.first_source_row_id is not None
+                    else None
+                )
+                for item in conn.execute(
+                    select(
+                        evidence_claims.c.evidence_key,
+                        evidence_claims.c.first_source_row_id,
+                    ).where(evidence_claims.c.evidence_key.in_(batch))
+                )
+            }
+        )
+    return result
+
+
+def _accepted_counts(
+    conn: Connection,
+    observation_keys: list[str],
+) -> dict[str, tuple[int, int]]:
+    result: dict[str, tuple[int, int]] = defaultdict(lambda: (0, 0))
+    for batch in _chunks(observation_keys):
+        query = (
+            select(
+                evidence_claims.c.observation_key,
+                func.count(evidence_claims.c.evidence_key).label("accepted"),
+                func.count(func.distinct(evidence_claims.c.independence_key)).label(
+                    "independent"
+                ),
+            )
+            .where(evidence_claims.c.observation_key.in_(batch))
+            .group_by(evidence_claims.c.observation_key)
+        )
+        for item in conn.execute(query):
+            result[str(item.observation_key)] = (
+                int(item.accepted),
+                int(item.independent),
+            )
+    return result
+
+
+def _update_observation_counts(
+    conn: Connection,
+    observation_ids: dict[str, int],
+    counts: dict[str, tuple[int, int]],
+    accepted_keys: set[str],
+    now: datetime,
+) -> None:
+    rows = []
+    for key, observation_id in observation_ids.items():
+        accepted, independent = counts.get(key, (0, 0))
+        rows.append(
+            {
+                "b_id": observation_id,
+                "b_occurrences": accepted,
+                "b_sources": independent,
+                "b_state": "new" if key in accepted_keys else "analyzed",
+                "b_now": now,
+            }
+        )
+    statement = (
+        update(pit_observations)
+        .where(pit_observations.c.id == bindparam("b_id"))
+        .values(
+            occurrence_count=bindparam("b_occurrences"),
+            source_count=bindparam("b_sources"),
+            state=bindparam("b_state"),
+            last_seen_at=bindparam("b_now"),
+            updated_at=bindparam("b_now"),
+        )
+    )
+    for batch in _chunks(rows):
+        if batch:
+            conn.execute(statement, batch)
 
 
 def reconcile_domain_evidence(
@@ -129,14 +229,7 @@ def reconcile_domain_evidence(
     now: datetime,
 ) -> dict[str, Any]:
     observation_keys = sorted({observation_key(row) for row in rows})
-    observation_ids = {
-        str(item.observation_key): int(item.id)
-        for item in conn.execute(
-            select(pit_observations.c.id, pit_observations.c.observation_key).where(
-                pit_observations.c.observation_key.in_(observation_keys)
-            )
-        )
-    }
+    observation_ids = _observation_ids(conn, observation_keys)
 
     registry_system = source_system(rows[0], source_kind) if rows else source_kind
     conn.execute(
@@ -214,15 +307,7 @@ def reconcile_domain_evidence(
         )
 
     inserted_claims = _insert_claims(conn, list(claim_by_key.values()))
-    claim_owners = {
-        str(item.evidence_key): int(item.first_source_row_id)
-        for item in conn.execute(
-            select(evidence_claims.c.evidence_key, evidence_claims.c.first_source_row_id).where(
-                evidence_claims.c.evidence_key.in_(list(claim_by_key))
-            )
-        )
-    }
-    accepted_source_rows: set[int] = set()
+    claim_owners = _claim_owners(conn, list(claim_by_key))
     seen_inserted: set[str] = set()
     source_rows_payload: list[dict[str, Any]] = []
     technical_source_rows: list[int] = []
@@ -230,7 +315,6 @@ def reconcile_domain_evidence(
         evidence_key = str(entry["evidence_key"])
         accepted = evidence_key in inserted_claims and evidence_key not in seen_inserted
         if accepted:
-            accepted_source_rows.add(int(entry["source_row_id"]))
             seen_inserted.add(evidence_key)
         else:
             technical_source_rows.append(int(entry["source_row_id"]))
@@ -238,9 +322,9 @@ def reconcile_domain_evidence(
             {
                 **entry,
                 "technical_duplicate": not accepted,
-                "duplicate_of_source_row_id": None
-                if accepted
-                else claim_owners.get(evidence_key),
+                "duplicate_of_source_row_id": (
+                    None if accepted else claim_owners.get(evidence_key)
+                ),
                 "created_at": now,
             }
         )
@@ -248,49 +332,35 @@ def reconcile_domain_evidence(
         if batch:
             conn.execute(insert(source_evidence), batch)
 
-    if technical_source_rows:
-        conn.execute(
-            delete(pit_occurrences).where(
-                pit_occurrences.c.source_row_id.in_(technical_source_rows)
+    for batch in _chunks(technical_source_rows):
+        if batch:
+            conn.execute(
+                delete(pit_occurrences).where(
+                    pit_occurrences.c.source_row_id.in_(batch)
+                )
             )
-        )
     _upsert_canonical(conn, canonical_rows)
 
-    touched_observation_ids = sorted(set(observation_ids.values()))
-    accepted_counts: dict[str, tuple[int, int]] = defaultdict(lambda: (0, 0))
-    if observation_keys:
-        count_query = (
-            select(
-                evidence_claims.c.observation_key,
-                func.count(evidence_claims.c.evidence_key).label("accepted"),
-                func.count(func.distinct(evidence_claims.c.independence_key)).label("independent"),
-            )
-            .where(evidence_claims.c.observation_key.in_(observation_keys))
-            .group_by(evidence_claims.c.observation_key)
-        )
-        for item in conn.execute(count_query):
-            accepted_counts[str(item.observation_key)] = (
-                int(item.accepted),
-                int(item.independent),
-            )
-    for key, observation_id in observation_ids.items():
-        accepted, independent = accepted_counts[key]
-        conn.execute(
-            update(pit_observations)
-            .where(pit_observations.c.id == observation_id)
-            .values(
-                occurrence_count=accepted,
-                source_count=independent,
-                state="new" if key in {claim_by_key[item]["observation_key"] for item in inserted_claims} else pit_observations.c.state,
-                last_seen_at=now,
-                updated_at=now,
-            )
-        )
+    accepted_observation_keys = {
+        str(claim_by_key[key]["observation_key"])
+        for key in inserted_claims
+        if key in claim_by_key
+    }
+    counts = _accepted_counts(conn, observation_keys)
+    _update_observation_counts(
+        conn,
+        observation_ids,
+        counts,
+        accepted_observation_keys,
+        now,
+    )
 
     return {
-        "observation_ids": touched_observation_ids,
+        "observation_ids": sorted(observation_ids.values()),
         "accepted_evidence": len(inserted_claims),
         "independent_evidence": len(inserted_claims),
         "technical_duplicates": len(technical_source_rows),
-        "canonical_addresses": len({item["canonical_address_key"] for item in canonical_rows}),
+        "canonical_addresses": len(
+            {item["canonical_address_key"] for item in canonical_rows}
+        ),
     }
