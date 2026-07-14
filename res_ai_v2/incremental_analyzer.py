@@ -206,20 +206,29 @@ def analyze_changed_addresses(address_ids: list[int]) -> dict[str, int]:
                     }
                 )
 
-        affected_subjects = {str(row["address_key"]) for row in rows}
+        affected_address_keys = {str(row["address_key"]) for row in rows}
+        affected_mapping_ids = {str(row["mapping_id"]) for row in rows}
         open_rows = conn.execute(
-            select(review_tasks.c.id, review_tasks.c.task_key, review_tasks.c.subject_key)
-            .where(
+            select(
+                review_tasks.c.id,
+                review_tasks.c.task_key,
+                review_tasks.c.task_type,
+                review_tasks.c.subject_key,
+            ).where(
                 review_tasks.c.status == "open",
                 review_tasks.c.task_type.in_(["mapping_conflict", "missing_context"]),
             )
         ).all()
-        stale_ids = [
-            int(item.id)
-            for item in open_rows
-            if str(item.subject_key) in affected_subjects
-            and str(item.task_key) not in valid_task_keys
-        ]
+        stale_ids = []
+        for item in open_rows:
+            subject_key = str(item.subject_key)
+            affected = (
+                subject_key in affected_address_keys
+                if str(item.task_type) == "mapping_conflict"
+                else subject_key in affected_mapping_ids
+            )
+            if affected and str(item.task_key) not in valid_task_keys:
+                stale_ids.append(int(item.id))
         if stale_ids:
             conn.execute(
                 update(review_tasks)
