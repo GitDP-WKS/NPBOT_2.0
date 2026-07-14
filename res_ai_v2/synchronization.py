@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import socket
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import timedelta
-from typing import Iterator
 from uuid import uuid4
 
 from sqlalchemy import delete, insert, or_, select, update
