@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections import defaultdict
 from typing import Any
 from uuid import uuid4
@@ -8,19 +9,28 @@ from sqlalchemy import delete, insert, or_, select, update
 
 from .db import bump_data_version, get_engine, get_setting, initialize_database, utcnow
 from .normalize import sha256_parts, stable_json
-from .pit_schema import knowledge_generations, pit_observations
+from .pit_schema import knowledge_directives, knowledge_generations, pit_observations
 from .pit_store import load_observations, observation_groups
 from .repositories import close_stale_tasks, create_or_update_task
+from .review_helpers import _apply
 from .schema import (
     address_aliases,
     address_mappings,
     addresses,
     mapping_evidence,
+    review_decisions,
+    review_tasks,
     text_examples,
 )
 from .structure import CURRENT_STRUCTURE
 
-AGENT_TASK_TYPES = {"mapping_conflict", "missing_context", "duplicate_observation"}
+AGENT_TASK_TYPES = {
+    "mapping_conflict",
+    "missing_context",
+    "duplicate_observation",
+    "import_issue",
+    "directive_challenge",
+}
 BATCH_SIZE = 500
 
 
@@ -41,14 +51,29 @@ def _anchor(row: dict[str, Any]) -> tuple[str, str]:
     return "locality", str(row.get("locality_key", ""))
 
 
+def _address_key(row: dict[str, Any]) -> str:
+    return sha256_parts(
+        [
+            str(row.get("locality_key", "")),
+            str(row.get("district_key", "")),
+            str(row.get("settlement_key", "")),
+            str(row.get("street_key", "")),
+        ]
+    )
+
+
 def _load_scope(observation_ids: list[int] | None) -> list[dict[str, Any]]:
     with get_engine().connect() as conn:
         if not observation_ids:
             return load_observations(conn)
         changed = load_observations(conn, observation_ids)
-        locality_keys = {str(row.get("locality_key", "")) for row in changed if row.get("locality_key")}
+        locality_keys = {
+            str(row.get("locality_key", "")) for row in changed if row.get("locality_key")
+        }
         settlement_keys = {
-            str(row.get("settlement_key", "")) for row in changed if row.get("settlement_key")
+            str(row.get("settlement_key", ""))
+            for row in changed
+            if row.get("settlement_key")
         }
         conditions = []
         if locality_keys:
@@ -61,8 +86,39 @@ def _load_scope(observation_ids: list[int] | None) -> list[dict[str, Any]]:
         return [dict(row._mapping) for row in conn.execute(query)]
 
 
+def _load_directives() -> dict[str, dict[str, Any]]:
+    query = (
+        select(
+            knowledge_directives,
+            review_tasks.c.task_key,
+            review_tasks.c.task_type,
+            review_tasks.c.subject_type.label("task_subject_type"),
+            review_tasks.c.subject_key.label("task_subject_key"),
+            review_tasks.c.title,
+            review_tasks.c.payload_json,
+            review_tasks.c.priority,
+        )
+        .select_from(
+            knowledge_directives.join(
+                review_tasks,
+                knowledge_directives.c.task_id == review_tasks.c.id,
+            )
+        )
+        .where(knowledge_directives.c.active.is_(True))
+        .order_by(knowledge_directives.c.id)
+    )
+    result: dict[str, dict[str, Any]] = {}
+    with get_engine().connect() as conn:
+        for row in conn.execute(query):
+            item = dict(row._mapping)
+            item["selection"] = json.loads(str(item["selection_json"]) or "{}")
+            result[str(item["task_key"])] = item
+    return result
+
+
 def _start_generation(trigger_type: str, trigger_key: str, full_rebuild: bool) -> int:
     now = utcnow()
+    source_version = int(get_setting("data_version", "1"))
     with get_engine().begin() as conn:
         return int(
             conn.execute(
@@ -71,7 +127,7 @@ def _start_generation(trigger_type: str, trigger_key: str, full_rebuild: bool) -
                     status="building",
                     trigger_type=trigger_type,
                     trigger_key=trigger_key,
-                    source_version=int(get_setting("data_version", "1")),
+                    source_version=source_version,
                     full_rebuild=full_rebuild,
                     rows_scanned=0,
                     rows_changed=0,
@@ -160,6 +216,72 @@ def _upsert_addresses(conn, groups: dict[str, list[dict[str, Any]]]) -> dict[str
     return existing
 
 
+def _directive_task(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": int(item["task_id"]),
+        "task_key": str(item["task_key"]),
+        "task_type": str(item["task_type"]),
+        "subject_type": str(item["task_subject_type"]),
+        "subject_key": str(item["task_subject_key"]),
+        "title": str(item["title"]),
+        "payload_json": str(item["payload_json"]),
+        "priority": int(item["priority"]),
+    }
+
+
+def _apply_directives(conn, directives: dict[str, dict[str, Any]]) -> int:
+    applied = 0
+    for item in directives.values():
+        task = _directive_task(item)
+        before, after = _apply(
+            conn,
+            task,
+            dict(item["selection"]),
+            str(item["actor"]),
+            1,
+        )
+        conn.execute(
+            update(review_decisions)
+            .where(
+                review_decisions.c.task_id == int(item["task_id"]),
+                review_decisions.c.active.is_(True),
+            )
+            .values(before_json=stable_json(before), after_json=stable_json(after))
+        )
+        applied += 1
+    return applied
+
+
+def _challenge_task(
+    task_key: str,
+    base_task: dict[str, Any],
+    directive: dict[str, Any],
+) -> dict[str, Any] | None:
+    selected = set(directive["selection"].get("selected_res", []))
+    observed = {
+        str(option.get("res", ""))
+        for option in base_task["payload"].get("options", [])
+        if option.get("res")
+    }
+    if observed.issubset(selected):
+        return None
+    signature = sha256_parts(sorted(observed | selected))
+    return {
+        "task_key": sha256_parts(["directive_challenge", task_key, signature]),
+        "task_type": "directive_challenge",
+        "subject_type": base_task["subject_type"],
+        "subject_key": base_task["subject_key"],
+        "title": "Новые данные противоречат прежнему решению",
+        "payload": {
+            **base_task["payload"],
+            "previous_selection": sorted(selected),
+            "allow_multiple": base_task["payload"].get("allow_multiple", False),
+            "allow_address_edit": True,
+        },
+        "priority": 110,
+    }
+
+
 def rebuild_knowledge(
     *,
     observation_ids: list[int] | None = None,
@@ -167,21 +289,19 @@ def rebuild_knowledge(
     trigger_type: str = "agent",
     trigger_key: str = "automatic",
 ) -> dict[str, Any]:
-    """Единственная точка записи рабочей базы знаний.
-
-    Импорт и решения людей попадают в яму/директивы. Только этот обработчик
-    преобразует их в адреса, связи адрес–РЭС и обучающие тексты.
-    """
+    """Единственная точка записи рабочей базы знаний."""
     initialize_database()
     generation_id = _start_generation(trigger_type, trigger_key, full_rebuild)
     try:
         rows = _load_scope(None if full_rebuild else observation_ids)
+        directives = _load_directives()
         valid = [
             row
             for row in rows
             if (row.get("locality_key") or row.get("settlement_key"))
             and str(row.get("res_name", "")) in CURRENT_STRUCTURE
         ]
+        invalid = [row for row in rows if row not in valid]
         groups = observation_groups(valid)
         contexts_by_anchor: dict[tuple[str, str], set[tuple[str, str, str]]] = defaultdict(set)
         rows_by_anchor: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
@@ -227,7 +347,7 @@ def rebuild_knowledge(
                 )
 
             mapping_rows: list[dict[str, Any]] = []
-            mapping_meta: list[tuple[str, str, list[dict[str, Any]], str, float]] = []
+            mapping_meta: list[tuple[str, str, list[dict[str, Any]]]] = []
             for address_key, group in groups.items():
                 by_res: dict[str, list[dict[str, Any]]] = defaultdict(list)
                 for row in group:
@@ -236,38 +356,43 @@ def rebuild_knowledge(
                 conflict = len(by_res) > 1
                 if conflict:
                     task_key = sha256_parts(["mapping_conflict", address_key])
-                    keep_keys.add(task_key)
-                    tasks.append(
-                        {
-                            "task_key": task_key,
-                            "task_type": "mapping_conflict",
-                            "subject_type": "address",
-                            "subject_key": address_key,
-                            "title": "Один адрес связан с разными РЭС",
-                            "payload": {
-                                "address": {
-                                    "address_key": address_key,
-                                    "locality": group[0].get("locality", ""),
-                                    "district": group[0].get("district", ""),
-                                    "settlement": group[0].get("settlement", ""),
-                                    "street": group[0].get("street", ""),
-                                },
-                                "options": [
-                                    {
-                                        "branch": CURRENT_STRUCTURE[res],
-                                        "res": res,
-                                        "occurrences": sum(
-                                            int(item.get("occurrence_count", 1)) for item in items
-                                        ),
-                                    }
-                                    for res, items in sorted(by_res.items())
-                                ],
-                                "allow_multiple": True,
-                                "allow_address_edit": True,
+                    base_task = {
+                        "task_key": task_key,
+                        "task_type": "mapping_conflict",
+                        "subject_type": "address",
+                        "subject_key": address_key,
+                        "title": "Один адрес связан с разными РЭС",
+                        "payload": {
+                            "address": {
+                                "address_key": address_key,
+                                "locality": group[0].get("locality", ""),
+                                "district": group[0].get("district", ""),
+                                "settlement": group[0].get("settlement", ""),
+                                "street": group[0].get("street", ""),
                             },
-                            "priority": 100,
-                        }
-                    )
+                            "options": [
+                                {
+                                    "branch": CURRENT_STRUCTURE[res],
+                                    "res": res,
+                                    "occurrences": sum(
+                                        int(item.get("occurrence_count", 1)) for item in items
+                                    ),
+                                }
+                                for res, items in sorted(by_res.items())
+                            ],
+                            "allow_multiple": True,
+                            "allow_address_edit": True,
+                        },
+                        "priority": 100,
+                    }
+                    if task_key in directives:
+                        challenge = _challenge_task(task_key, base_task, directives[task_key])
+                        if challenge:
+                            keep_keys.add(challenge["task_key"])
+                            tasks.append(challenge)
+                    else:
+                        keep_keys.add(task_key)
+                        tasks.append(base_task)
 
                 anchor = _anchor(group[0])
                 contexts = len(contexts_by_anchor.get(anchor, set())) or 1
@@ -289,39 +414,44 @@ def rebuild_knowledge(
                             "updated_at": now,
                         }
                     )
-                    mapping_meta.append((address_key, res_name, items, status, confidence))
+                    mapping_meta.append((address_key, res_name, items))
                     if duplicate and not conflict:
                         task_key = sha256_parts(["duplicate_observation", address_key, res_name])
-                        keep_keys.add(task_key)
-                        tasks.append(
-                            {
-                                "task_key": task_key,
-                                "task_type": "duplicate_observation",
-                                "subject_type": "address",
-                                "subject_key": address_key,
-                                "title": "Адрес повторяется в исходных данных",
-                                "payload": {
-                                    "address": {
-                                        "address_key": address_key,
-                                        "locality": items[0].get("locality", ""),
-                                        "district": items[0].get("district", ""),
-                                        "settlement": items[0].get("settlement", ""),
-                                        "street": items[0].get("street", ""),
-                                    },
-                                    "current": {
-                                        "branch": CURRENT_STRUCTURE[res_name],
-                                        "res": res_name,
-                                    },
-                                    "options": [
-                                        {"branch": CURRENT_STRUCTURE[res_name], "res": res_name}
-                                    ],
-                                    "occurrences": occurrences,
-                                    "allow_multiple": False,
-                                    "allow_address_edit": True,
+                        base_task = {
+                            "task_key": task_key,
+                            "task_type": "duplicate_observation",
+                            "subject_type": "address",
+                            "subject_key": address_key,
+                            "title": "Адрес повторяется в исходных данных",
+                            "payload": {
+                                "address": {
+                                    "address_key": address_key,
+                                    "locality": items[0].get("locality", ""),
+                                    "district": items[0].get("district", ""),
+                                    "settlement": items[0].get("settlement", ""),
+                                    "street": items[0].get("street", ""),
                                 },
-                                "priority": 85,
-                            }
-                        )
+                                "current": {
+                                    "branch": CURRENT_STRUCTURE[res_name],
+                                    "res": res_name,
+                                },
+                                "options": [
+                                    {"branch": CURRENT_STRUCTURE[res_name], "res": res_name}
+                                ],
+                                "occurrences": occurrences,
+                                "allow_multiple": False,
+                                "allow_address_edit": True,
+                            },
+                            "priority": 85,
+                        }
+                        if task_key in directives:
+                            challenge = _challenge_task(task_key, base_task, directives[task_key])
+                            if challenge:
+                                keep_keys.add(challenge["task_key"])
+                                tasks.append(challenge)
+                        else:
+                            keep_keys.add(task_key)
+                            tasks.append(base_task)
 
             for batch in _chunks(mapping_rows):
                 if batch:
@@ -339,7 +469,7 @@ def rebuild_knowledge(
 
             evidence_rows = []
             text_rows: dict[str, dict[str, Any]] = {}
-            for address_key, res_name, items, _, _ in mapping_meta:
+            for address_key, res_name, items in mapping_meta:
                 mapping_id = mapping_ids[(address_ids[address_key], res_name)]
                 for item in items:
                     evidence_rows.append(
@@ -376,13 +506,44 @@ def rebuild_knowledge(
                 if batch:
                     conn.execute(insert(text_examples), batch)
 
-            for row in valid:
+            applied_directives = _apply_directives(conn, directives)
+            valid_ids = [int(row["id"]) for row in rows]
+            for batch in _chunks(valid_ids, 1000):
                 conn.execute(
                     update(pit_observations)
-                    .where(pit_observations.c.id == int(row["id"]))
+                    .where(pit_observations.c.id.in_(batch))
                     .values(state="analyzed", updated_at=now)
                 )
-            changed = len(mapping_rows)
+            changed = len(mapping_rows) + applied_directives
+
+        for row in invalid:
+            task_key = sha256_parts(["import_issue", str(row["observation_key"])])
+            if task_key in directives:
+                continue
+            keep_keys.add(task_key)
+            tasks.append(
+                {
+                    "task_key": task_key,
+                    "task_type": "import_issue",
+                    "subject_type": "observation",
+                    "subject_key": str(row["id"]),
+                    "title": "Не удалось определить адрес или РЭС",
+                    "payload": {
+                        "observation_id": row["id"],
+                        "address": {
+                            "locality": row.get("locality", ""),
+                            "district": row.get("district", ""),
+                            "settlement": row.get("settlement", ""),
+                            "street": row.get("street", ""),
+                        },
+                        "raw_text": row.get("raw_text", ""),
+                        "options": [],
+                        "allow_multiple": False,
+                        "allow_address_edit": True,
+                    },
+                    "priority": 95,
+                }
+            )
 
         for anchor, contexts in contexts_by_anchor.items():
             if len(contexts) <= 1:
@@ -390,30 +551,23 @@ def rebuild_knowledge(
             for row in rows_by_anchor[anchor]:
                 if row.get("district_key"):
                     continue
-                address_key = sha256_parts(
-                    [
-                        str(row.get("locality_key", "")),
-                        str(row.get("district_key", "")),
-                        str(row.get("settlement_key", "")),
-                        str(row.get("street_key", "")),
-                    ]
-                )
+                address_key = _address_key(row)
                 task_key = sha256_parts(["missing_context", address_key, str(row["res_name"])])
+                if task_key in directives:
+                    continue
                 keep_keys.add(task_key)
-                candidates = []
-                for option in rows_by_anchor[anchor]:
-                    if not option.get("district_key"):
-                        continue
-                    candidates.append(
-                        {
-                            "district": option.get("district", ""),
-                            "locality": option.get("locality", ""),
-                            "settlement": option.get("settlement", ""),
-                            "street": option.get("street", ""),
-                            "branch": option.get("branch_name", ""),
-                            "res": option.get("res_name", ""),
-                        }
-                    )
+                candidates = [
+                    {
+                        "district": option.get("district", ""),
+                        "locality": option.get("locality", ""),
+                        "settlement": option.get("settlement", ""),
+                        "street": option.get("street", ""),
+                        "branch": option.get("branch_name", ""),
+                        "res": option.get("res_name", ""),
+                    }
+                    for option in rows_by_anchor[anchor]
+                    if option.get("district_key")
+                ]
                 tasks.append(
                     {
                         "task_key": task_key,
@@ -458,6 +612,11 @@ def rebuild_knowledge(
             "missing_context": sum(
                 1 for task in tasks if task["task_type"] == "missing_context"
             ),
+            "invalid": sum(1 for task in tasks if task["task_type"] == "import_issue"),
+            "directive_challenges": sum(
+                1 for task in tasks if task["task_type"] == "directive_challenge"
+            ),
+            "directives_applied": len(directives),
             "stale_closed": stale_closed,
             "full_rebuild": full_rebuild,
         }
@@ -467,6 +626,11 @@ def rebuild_knowledge(
         _finish_generation(
             generation_id,
             status="failed",
-            stats={"rows_scanned": 0, "rows_changed": 0, "tasks_created": 0, "error": str(exc)},
+            stats={
+                "rows_scanned": 0,
+                "rows_changed": 0,
+                "tasks_created": 0,
+                "error": str(exc),
+            },
         )
         raise
