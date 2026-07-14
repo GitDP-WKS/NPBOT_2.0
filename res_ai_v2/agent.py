@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from .agent_monitor import recover_stale_events
 from .config import load_settings
+from .daily_audit import mark_daily_finished, mark_daily_started
 from .db import get_engine, get_setting, set_setting
 from .event_bus import AgentEvent, claim_next_event, complete_event, fail_event, publish_event, worker_identity
 from .event_schema import agent_events
@@ -99,6 +100,23 @@ def _full_analysis_event(event: AgentEvent) -> dict[str, Any]:
     }
 
 
+def _daily_audit_event(event: AgentEvent) -> dict[str, Any]:
+    run_date = str(event.payload.get("run_date") or event.subject_key)
+    mark_daily_started(run_date, event.id)
+    try:
+        result = _full_analysis_event(event)
+    except Exception as exc:
+        mark_daily_finished(
+            run_date,
+            event.id,
+            {"error": str(exc)},
+            failed=True,
+        )
+        raise
+    mark_daily_finished(run_date, event.id, result)
+    return result
+
+
 def _train_candidate_event(event: AgentEvent) -> dict[str, Any]:
     actor = str(event.payload.get("actor") or "Агент РЭС AI")
     result = train_candidate(actor=actor)
@@ -121,7 +139,7 @@ HANDLERS: dict[str, EventHandler] = {
     "human_confirmed": _human_event,
     "knowledge_directive_revoked": _human_event,
     "full_analysis_requested": _full_analysis_event,
-    "daily_full_audit": _full_analysis_event,
+    "daily_full_audit": _daily_audit_event,
     "training_requested": _train_candidate_event,
 }
 
