@@ -227,9 +227,7 @@ def build_knowledge_plan(
             occurrence_count = sum(
                 int(item.get("occurrence_count", 1)) for item in observations
             )
-            duplicate = any(
-                int(item.get("occurrence_count", 1)) > 1 for item in observations
-            )
+            duplicate = occurrence_count > 1
             mappings.append(
                 MappingSpec(
                     address_key=address_key,
