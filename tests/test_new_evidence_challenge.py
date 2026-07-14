@@ -7,7 +7,7 @@ from res_ai_v2.review_service import submit_review_and_update_agent
 from tests.test_import_and_analysis import make_plan
 
 
-def test_new_conflicting_evidence_creates_a_new_task(temp_db) -> None:
+def test_new_independent_conflicting_evidence_creates_a_new_task(temp_db) -> None:
     import_plan(
         make_plan(
             "e1" * 32,
@@ -16,11 +16,15 @@ def test_new_conflicting_evidence_creates_a_new_task(temp_db) -> None:
                     "res": "Лаишевский район электрических сетей",
                     "locality": "Усады",
                     "district": "Лаишевский",
+                    "source_system": "112",
+                    "source_event_id": "initial-1",
                 },
                 {
                     "res": "Пригородный район электрических сетей",
                     "locality": "Усады",
                     "district": "Лаишевский",
+                    "source_system": "112",
+                    "source_event_id": "initial-2",
                 },
             ],
         )
@@ -31,6 +35,7 @@ def test_new_conflicting_evidence_creates_a_new_task(temp_db) -> None:
         task["id"],
         "Иванов",
         {
+            "decision_type": "confirmed",
             "selected_res": ["Лаишевский район электрических сетей"],
             "locality": "Усады",
             "district": "Лаишевский",
@@ -50,6 +55,8 @@ def test_new_conflicting_evidence_creates_a_new_task(temp_db) -> None:
                     "res": "Пригородный район электрических сетей",
                     "locality": "Усады",
                     "district": "Лаишевский",
+                    "source_system": "112",
+                    "source_event_id": "new-independent-conflict",
                 }
             ],
         )
