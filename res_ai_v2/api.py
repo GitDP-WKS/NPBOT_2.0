@@ -15,7 +15,7 @@ from .event_bus import queue_status
 from .import_service import import_plan
 from .importer import inspect_excel
 from .quality import dashboard
-from .repositories import list_review_tasks
+from .review_queue import claim_review_task
 from .review_service import submit_review_and_update_agent
 from .search import load_search_index, predict
 
@@ -26,7 +26,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="РЭС AI API", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="РЭС AI API", version="1.1.0", lifespan=lifespan)
 
 
 class PredictRequest(BaseModel):
@@ -35,6 +35,7 @@ class PredictRequest(BaseModel):
 
 class ReviewRequest(BaseModel):
     reviewer: str = Field(min_length=2, max_length=160)
+    lease_token: str = Field(min_length=16, max_length=128)
     selected_res: list[str] = Field(default_factory=list)
     locality: str = ""
     district: str = ""
@@ -93,9 +94,12 @@ def predict_endpoint(request: PredictRequest) -> dict[str, Any]:
 @app.get("/v1/tasks")
 def tasks_endpoint(
     reviewer: str = Query(min_length=2, max_length=160),
-    limit: int = Query(default=20, ge=1, le=100),
 ) -> dict[str, Any]:
-    return {"items": list_review_tasks(reviewer, limit), "limit": limit}
+    try:
+        task = claim_review_task(reviewer)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"items": [task] if task else [], "limit": 1}
 
 
 @app.post("/v1/tasks/{task_id}/vote")
@@ -107,20 +111,26 @@ def vote_endpoint(
     if request.as_admin:
         _require_admin(x_admin_password)
     selection = {
-        "selected_res": [] if request.none_correct else list(dict.fromkeys(request.selected_res)),
+        "selected_res": []
+        if request.none_correct
+        else list(dict.fromkeys(request.selected_res)),
         "locality": request.locality,
         "district": request.district,
         "settlement": request.settlement,
         "street": request.street,
     }
     if not selection["selected_res"] and not request.none_correct:
-        raise HTTPException(status_code=422, detail="Выберите РЭС или укажите, что правильного варианта нет.")
+        raise HTTPException(
+            status_code=422,
+            detail="Выберите РЭС или укажите, что правильного варианта нет.",
+        )
     try:
         return submit_review_and_update_agent(
             task_id,
             request.reviewer,
             selection,
             request.as_admin,
+            request.lease_token,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
