@@ -69,6 +69,7 @@ knowledge_directives = Table(
     Column("subject_key", String(128), nullable=False, index=True),
     Column("selection_json", Text, nullable=False),
     Column("actor", Text, nullable=False),
+    Column("source_version", Integer, nullable=False, default=0),
     Column("active", Boolean, nullable=False, default=True, index=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("revoked_at", DateTime(timezone=True), nullable=True),
