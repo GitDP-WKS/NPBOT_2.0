@@ -39,6 +39,7 @@ def get_engine() -> Engine:
 @lru_cache(maxsize=1)
 def initialize_database() -> None:
     engine = get_engine()
+    from .domain_bootstrap import bootstrap_domain_metadata
     from .migrations import run_migrations
     from .pit_bootstrap import BOOTSTRAP_SETTING, bootstrap_current_knowledge
 
@@ -89,6 +90,7 @@ def initialize_database() -> None:
                     updated_at=now,
                 )
             )
+        bootstrap_domain_metadata(conn, now)
 
 
 def get_setting(key: str, default: str = "") -> str:
