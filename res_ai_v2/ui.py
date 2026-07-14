@@ -3,7 +3,8 @@ from __future__ import annotations
 import streamlit as st
 
 from .db import initialize_database, storage_name
-from .page_data_admin import page_home, page_journal, page_knowledge, page_settings, page_upload
+from .page_data_admin import page_home, page_knowledge, page_settings, page_upload
+from .page_journal import page_journal
 from .page_model_admin import page_quality, page_training
 from .page_predict import page_predict
 from .page_review import page_review
@@ -33,7 +34,16 @@ def main() -> None:
     st.sidebar.success(f"Общее хранилище: {storage_name()}")
     st.sidebar.caption("Все компьютеры должны открывать один и тот же адрес приложения Streamlit.")
     page = st.sidebar.radio("Раздел", pages)
-    handlers = {"Главная": page_home, "Определение": page_predict, "Загрузка": page_upload, "База знаний": page_knowledge, "Анализ и обучение": page_training, "Качество": page_quality, "Журнал": page_journal, "Настройки": page_settings}
+    handlers = {
+        "Главная": page_home,
+        "Определение": page_predict,
+        "Загрузка": page_upload,
+        "База знаний": page_knowledge,
+        "Анализ и обучение": page_training,
+        "Качество": page_quality,
+        "Журнал": page_journal,
+        "Настройки": page_settings,
+    }
     if page == "Проверка":
         page_review(is_admin, reviewer)
     else:
