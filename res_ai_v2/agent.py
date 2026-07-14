@@ -72,8 +72,11 @@ def _pit_event(event: AgentEvent) -> dict[str, Any]:
 
 
 def _human_event(event: AgentEvent) -> dict[str, Any]:
+    observation_ids = _positive_ids(event, "observation_ids")
+    force_full = bool(event.payload.get("force_full")) or not observation_ids
     analysis = rebuild_knowledge(
-        full_rebuild=True,
+        observation_ids=None if force_full else observation_ids,
+        full_rebuild=force_full,
         trigger_type=event.event_type,
         trigger_key=event.subject_key,
     )
@@ -81,7 +84,8 @@ def _human_event(event: AgentEvent) -> dict[str, Any]:
     return {
         "event": event.event_type,
         "subject": event.subject_key,
-        "scope": "full_pit",
+        "scope": "full_pit" if force_full else "changed_observations",
+        "observation_ids": observation_ids,
         "analysis": analysis,
         "training_event_id": training_event_id,
     }
