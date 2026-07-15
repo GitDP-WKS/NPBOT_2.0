@@ -6,7 +6,7 @@ from typing import Any
 import streamlit as st
 
 from .background_worker import start_background_worker
-from .db import initialize_database, storage_name
+from .db import initialize_database
 from .page_agent_admin import page_agent_center
 from .page_data_admin import page_home, page_knowledge, page_upload
 from .page_journal import page_journal
@@ -58,6 +58,28 @@ def runtime_status() -> dict[str, Any]:
     return dict(_RUNTIME_STATE)
 
 
+def _render_runtime_wait(page: str, status: dict[str, Any]) -> None:
+    """Показывает выбранный раздел, не блокируя навигацию ожиданием Neon."""
+    if page == "Загрузка":
+        page_upload()
+        return
+    if page == "Определение":
+        page_predict()
+        return
+
+    st.header(page)
+    if status["error"]:
+        st.error("Не удалось подключить единую базу Neon.")
+        st.code(status["error"])
+        if st.button("Повторить подключение", use_container_width=True):
+            _start_runtime_async()
+            st.rerun()
+    else:
+        st.info("Система запускается. Раздел уже выбран и откроется после подключения базы.")
+        if st.button("Обновить состояние", use_container_width=True):
+            st.rerun()
+
+
 def main() -> None:
     st.set_page_config(page_title="РЭС AI 2.0", page_icon="⚡", layout="wide")
     configure()
@@ -87,21 +109,11 @@ def main() -> None:
             "Журнал",
             "Настройки",
         ]
-    st.sidebar.success(f"Общая база: {storage_name()}")
-    page = st.sidebar.radio("Раздел", pages)
+    page = st.sidebar.radio("Раздел", pages, key="main_navigation")
 
     status = runtime_status()
     if not status["ready"]:
-        if status["error"]:
-            st.error("Общая база данных недоступна.")
-            st.code(status["error"])
-            if st.button("Повторить подключение", use_container_width=True):
-                _start_runtime_async()
-                st.rerun()
-        else:
-            st.info("Подключаю общую базу. Меню уже доступно.")
-            if st.button("Проверить подключение", use_container_width=True):
-                st.rerun()
+        _render_runtime_wait(page, status)
         return
 
     handlers = {
