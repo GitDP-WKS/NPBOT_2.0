@@ -56,6 +56,17 @@ def test_streamlit_runtime_keeps_error_without_blocking(monkeypatch):
     _reset_runtime(ui)
 
 
+def test_streamlit_common_render_path_has_no_blocking_database_calls():
+    from pathlib import Path
+
+    source = Path("res_ai_v2/ui.py").read_text(encoding="utf-8")
+
+    assert "storage_name" not in source
+    assert "ensure_daily_audit" not in source
+    assert "initialize_database()" in source
+    assert source.index("initialize_database()") < source.index("def main()")
+
+
 def test_storage_label_does_not_initialize_database(monkeypatch):
     from res_ai_v2 import db
 
@@ -64,11 +75,3 @@ def test_storage_label_does_not_initialize_database(monkeypatch):
 
     monkeypatch.setattr(db, "initialize_database", forbidden)
     assert db.storage_name() in {"PostgreSQL / Neon", "SQLite (локально)"}
-
-
-def test_streamlit_render_does_not_schedule_daily_audit():
-    from pathlib import Path
-
-    source = Path("res_ai_v2/ui.py").read_text(encoding="utf-8")
-
-    assert "ensure_daily_audit" not in source
