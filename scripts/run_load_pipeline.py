@@ -19,15 +19,19 @@ def _row_with_unique_conflict_position(index: int, *, prefix: str, res_name: str
     return row
 
 
+def run_pipeline(rows: int):
+    pipeline._row = _row_with_unique_conflict_position
+    return pipeline.run_pipeline(rows)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--rows", type=int, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
-    pipeline._row = _row_with_unique_conflict_position
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    result = pipeline.run_pipeline(args.rows)
+    result = run_pipeline(args.rows)
     args.output.write_text(
         json.dumps(result, ensure_ascii=False, indent=2, default=str),
         encoding="utf-8",
