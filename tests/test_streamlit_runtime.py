@@ -56,19 +56,27 @@ def test_streamlit_runtime_keeps_error_without_blocking(monkeypatch):
     _reset_runtime(ui)
 
 
-def test_storage_label_does_not_initialize_database(monkeypatch):
-    from res_ai_v2 import db
+def test_upload_and_predict_open_before_database_is_ready(monkeypatch):
+    from res_ai_v2 import ui
 
-    def forbidden() -> None:
-        raise AssertionError("storage_name must not initialize the database")
+    opened: list[str] = []
+    monkeypatch.setattr(ui, "page_upload", lambda: opened.append("upload"))
+    monkeypatch.setattr(ui, "page_predict", lambda: opened.append("predict"))
 
-    monkeypatch.setattr(db, "initialize_database", forbidden)
-    assert db.storage_name() in {"PostgreSQL / Neon", "SQLite (локально)"}
+    waiting = {"ready": False, "running": True, "error": ""}
+    ui._render_runtime_wait("Загрузка", waiting)
+    ui._render_runtime_wait("Определение", waiting)
+
+    assert opened == ["upload", "predict"]
 
 
-def test_streamlit_render_does_not_schedule_daily_audit():
+def test_streamlit_navigation_has_no_database_call_before_page_selection():
     from pathlib import Path
 
     source = Path("res_ai_v2/ui.py").read_text(encoding="utf-8")
+    radio_position = source.index('st.sidebar.radio("Раздел"')
+    before_navigation = source[:radio_position]
 
+    assert "storage_name" not in source
+    assert "initialize_database()" not in before_navigation
     assert "ensure_daily_audit" not in source
