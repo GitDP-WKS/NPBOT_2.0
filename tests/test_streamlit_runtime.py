@@ -71,12 +71,14 @@ def test_upload_and_predict_open_before_database_is_ready(monkeypatch):
 
 
 def test_streamlit_navigation_has_no_database_call_before_page_selection():
-    from pathlib import Path
+    import inspect
 
-    source = Path("res_ai_v2/ui.py").read_text(encoding="utf-8")
-    radio_position = source.index('st.sidebar.radio("Раздел"')
-    before_navigation = source[:radio_position]
+    from res_ai_v2 import ui
 
-    assert "storage_name" not in source
-    assert "initialize_database()" not in before_navigation
-    assert "ensure_daily_audit" not in source
+    main_source = inspect.getsource(ui.main)
+    full_source = inspect.getsource(ui)
+
+    assert "storage_name" not in full_source
+    assert "initialize_database" not in main_source
+    assert "ensure_daily_audit" not in full_source
+    assert main_source.index('st.sidebar.radio("Раздел"') < main_source.index("runtime_status()")
