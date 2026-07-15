@@ -3,7 +3,6 @@ from __future__ import annotations
 import streamlit as st
 
 from .background_worker import start_background_worker
-from .daily_audit import ensure_daily_audit
 from .db import initialize_database, storage_name
 from .page_agent_admin import page_agent_center
 from .page_data_admin import page_home, page_knowledge, page_upload
@@ -15,6 +14,14 @@ from .page_settings_admin import page_settings
 from .ui_common import admin_login, configure, style
 
 
+@st.cache_resource(show_spinner=False)
+def _initialize_runtime() -> bool:
+    """Инициализирует БД и фоновый агент один раз на процесс Streamlit."""
+    initialize_database()
+    start_background_worker()
+    return True
+
+
 def main() -> None:
     st.set_page_config(page_title="РЭС AI 2.0", page_icon="⚡", layout="wide")
     configure()
@@ -23,9 +30,7 @@ def main() -> None:
     st.caption("Определение филиала и РЭС по Республике Татарстан")
 
     try:
-        initialize_database()
-        ensure_daily_audit()
-        start_background_worker()
+        _initialize_runtime()
     except Exception as exc:
         st.error("Общая база данных недоступна.")
         st.code(str(exc))
