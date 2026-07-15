@@ -173,5 +173,5 @@ def bump_data_version() -> int:
 
 
 def storage_name() -> str:
-    initialize_database()
+    """Возвращает подпись хранилища без подключения к базе данных."""
     return "PostgreSQL / Neon" if get_engine().dialect.name == "postgresql" else "SQLite (локально)"
