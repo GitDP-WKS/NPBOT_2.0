@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import threading
+from typing import Any
+
 import streamlit as st
 
 from .background_worker import start_background_worker
@@ -13,13 +16,46 @@ from .page_review import page_review
 from .page_settings_admin import page_settings
 from .ui_common import admin_login, configure, style
 
+_RUNTIME_LOCK = threading.Lock()
+_RUNTIME_THREAD: threading.Thread | None = None
+_RUNTIME_STATE: dict[str, Any] = {
+    "ready": False,
+    "running": False,
+    "error": "",
+}
 
-@st.cache_resource(show_spinner=False)
-def _initialize_runtime() -> bool:
-    """Инициализирует БД и фоновый агент один раз на процесс Streamlit."""
-    initialize_database()
-    start_background_worker()
-    return True
+
+def _runtime_bootstrap() -> None:
+    _RUNTIME_STATE["running"] = True
+    _RUNTIME_STATE["error"] = ""
+    try:
+        initialize_database()
+        start_background_worker()
+        _RUNTIME_STATE["ready"] = True
+    except Exception as exc:
+        _RUNTIME_STATE["error"] = str(exc)[:2000]
+    finally:
+        _RUNTIME_STATE["running"] = False
+
+
+def _start_runtime_async() -> None:
+    """Запускает подготовку базы и агента без блокировки интерфейса."""
+    global _RUNTIME_THREAD
+    if _RUNTIME_STATE["ready"]:
+        return
+    with _RUNTIME_LOCK:
+        if _RUNTIME_THREAD and _RUNTIME_THREAD.is_alive():
+            return
+        _RUNTIME_THREAD = threading.Thread(
+            target=_runtime_bootstrap,
+            name="res-ai-runtime-bootstrap",
+            daemon=True,
+        )
+        _RUNTIME_THREAD.start()
+
+
+def runtime_status() -> dict[str, Any]:
+    return dict(_RUNTIME_STATE)
 
 
 def main() -> None:
@@ -29,12 +65,7 @@ def main() -> None:
     st.title("РЭС AI")
     st.caption("Определение филиала и РЭС по Республике Татарстан")
 
-    try:
-        _initialize_runtime()
-    except Exception as exc:
-        st.error("Общая база данных недоступна.")
-        st.code(str(exc))
-        st.stop()
+    _start_runtime_async()
 
     is_admin = admin_login()
     reviewer = (
@@ -58,6 +89,21 @@ def main() -> None:
         ]
     st.sidebar.success(f"Общая база: {storage_name()}")
     page = st.sidebar.radio("Раздел", pages)
+
+    status = runtime_status()
+    if not status["ready"]:
+        if status["error"]:
+            st.error("Общая база данных недоступна.")
+            st.code(status["error"])
+            if st.button("Повторить подключение", use_container_width=True):
+                _start_runtime_async()
+                st.rerun()
+        else:
+            st.info("Подключаю общую базу. Меню уже доступно.")
+            if st.button("Проверить подключение", use_container_width=True):
+                st.rerun()
+        return
+
     handlers = {
         "Главная": page_home,
         "Определение": page_predict,
