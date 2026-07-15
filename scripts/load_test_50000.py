@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.load_test_pipeline import run_pipeline  # noqa: E402
+from scripts.run_load_pipeline import run_pipeline  # noqa: E402
 
 
 def main() -> int:
