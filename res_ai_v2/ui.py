@@ -58,6 +58,28 @@ def runtime_status() -> dict[str, Any]:
     return dict(_RUNTIME_STATE)
 
 
+def _render_runtime_wait(page: str, status: dict[str, Any]) -> None:
+    """Отрисовывает выбранный раздел без блокировки ожиданием Neon."""
+    if page == "Загрузка":
+        page_upload()
+        return
+    if page == "Определение":
+        page_predict()
+        return
+
+    st.header(page)
+    if status["error"]:
+        st.error("Не удалось подключить единую базу Neon.")
+        st.code(status["error"])
+        if st.button("Повторить подключение", use_container_width=True):
+            _start_runtime_async()
+            st.rerun()
+    else:
+        st.info("Система запускается. Раздел уже выбран и откроется после подключения базы.")
+        if st.button("Обновить состояние", use_container_width=True):
+            st.rerun()
+
+
 def main() -> None:
     st.set_page_config(page_title="РЭС AI 2.0", page_icon="⚡", layout="wide")
     configure()
@@ -87,20 +109,11 @@ def main() -> None:
             "Журнал",
             "Настройки",
         ]
-    page = st.sidebar.radio("Раздел", pages)
+    page = st.sidebar.radio("Раздел", pages, key="main_navigation")
 
     status = runtime_status()
     if not status["ready"]:
-        if status["error"]:
-            st.error("Общая база данных недоступна.")
-            st.code(status["error"])
-            if st.button("Повторить подключение", use_container_width=True):
-                _start_runtime_async()
-                st.rerun()
-        else:
-            st.info("Система запускается.")
-            if st.button("Обновить", use_container_width=True):
-                st.rerun()
+        _render_runtime_wait(page, status)
         return
 
     handlers = {
