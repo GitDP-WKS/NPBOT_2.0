@@ -56,15 +56,32 @@ def test_streamlit_runtime_keeps_error_without_blocking(monkeypatch):
     _reset_runtime(ui)
 
 
+def test_upload_and_predict_open_before_database_is_ready(monkeypatch):
+    from res_ai_v2 import ui
+
+    opened: list[str] = []
+    monkeypatch.setattr(ui, "page_upload", lambda: opened.append("upload"))
+    monkeypatch.setattr(ui, "page_predict", lambda: opened.append("predict"))
+
+    waiting = {"ready": False, "running": True, "error": ""}
+    ui._render_runtime_wait("Загрузка", waiting)
+    ui._render_runtime_wait("Определение", waiting)
+
+    assert opened == ["upload", "predict"]
+
+
 def test_streamlit_common_render_path_has_no_blocking_database_calls():
-    from pathlib import Path
+    import inspect
 
-    source = Path("res_ai_v2/ui.py").read_text(encoding="utf-8")
+    from res_ai_v2 import ui
 
-    assert "storage_name" not in source
-    assert "ensure_daily_audit" not in source
-    assert "initialize_database()" in source
-    assert source.index("initialize_database()") < source.index("def main()")
+    main_source = inspect.getsource(ui.main)
+    full_source = inspect.getsource(ui)
+
+    assert "storage_name" not in full_source
+    assert "ensure_daily_audit" not in full_source
+    assert "initialize_database" not in main_source
+    assert main_source.index('st.sidebar.radio("Раздел"') < main_source.index("runtime_status()")
 
 
 def test_storage_label_does_not_initialize_database(monkeypatch):
