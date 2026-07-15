@@ -46,14 +46,18 @@ def admin_login() -> bool:
     if st.session_state.get("is_admin"):
         if st.sidebar.button("Выйти из служебного режима", use_container_width=True):
             st.session_state["is_admin"] = False
+            st.session_state["main_navigation"] = "Проверка"
             st.rerun()
         return True
     with st.sidebar.expander("Служебный вход"):
-        password = st.text_input("Пароль", type="password", label_visibility="collapsed")
-        if st.button("Войти", use_container_width=True):
+        with st.form("admin_login_form"):
+            value = st.text_input("Пароль", type="password", label_visibility="collapsed")
+            submitted = st.form_submit_button("Войти", use_container_width=True)
+        if submitted:
             expected = os.getenv("ADMIN_PASSWORD", "")
-            if expected and password == expected:
+            if expected and value == expected:
                 st.session_state["is_admin"] = True
+                st.session_state["main_navigation"] = "Загрузка"
                 st.rerun()
             else:
                 st.error("Неверный пароль.")
