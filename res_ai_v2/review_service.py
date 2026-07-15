@@ -3,58 +3,62 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, select
 
 from .agent import run_until_event
-from .db import get_engine, initialize_database
+from .db import get_engine
 from .event_bus import publish_event
+from .normalize import normalize_entity
+from .pit_schema import pit_observations
+from .review_policy import is_fundamental_decision, normalize_review_selection
+from .review_queue import release_review_task, validate_review_lease
 from .reviews import submit_review
-from .schema import address_mappings, review_decisions, review_tasks
+from .schema import review_tasks
+from .source_feedback import record_source_feedback
 
 
-def _affected_address_ids(task_id: int) -> list[int]:
-    initialize_database()
+def _task_scope(task_id: int) -> dict[str, Any]:
     with get_engine().connect() as conn:
         row = conn.execute(
-            select(review_tasks.c.payload_json).where(review_tasks.c.id == task_id)
+            select(
+                review_tasks.c.task_type,
+                review_tasks.c.subject_type,
+                review_tasks.c.subject_key,
+                review_tasks.c.payload_json,
+            ).where(review_tasks.c.id == task_id)
         ).first()
         if not row:
-            return []
+            return {"observation_ids": [], "task_type": "unknown"}
         payload = json.loads(str(row.payload_json) or "{}")
-        mapping_ids: set[int] = set()
-        if payload.get("mapping_id"):
-            mapping_ids.add(int(payload["mapping_id"]))
-        for option in payload.get("options") or []:
-            if option.get("mapping_id"):
-                mapping_ids.add(int(option["mapping_id"]))
-        if not mapping_ids:
-            return []
-        return sorted(
-            {
+        observation_ids: set[int] = set()
+        if payload.get("observation_id"):
+            observation_ids.add(int(payload["observation_id"]))
+        if row.subject_type == "observation" and str(row.subject_key).isdigit():
+            observation_ids.add(int(row.subject_key))
+
+        address = dict(payload.get("address") or {})
+        if address.get("locality") or address.get("settlement") or address.get("territory"):
+            keys = {
+                key: normalize_entity(str(address.get(key, "")))
+                for key in ("locality", "district", "settlement", "street")
+            }
+            conditions = [
+                pit_observations.c.locality_key == keys["locality"],
+                pit_observations.c.district_key == keys["district"],
+                pit_observations.c.settlement_key == keys["settlement"],
+                pit_observations.c.street_key == keys["street"],
+            ]
+            observation_ids.update(
                 int(value)
                 for value in conn.scalars(
-                    select(address_mappings.c.address_id).where(
-                        address_mappings.c.id.in_(mapping_ids)
-                    )
+                    select(pit_observations.c.id).where(and_(*conditions))
                 )
-            }
-        )
-
-
-def _active_decision_id(task_id: int) -> int:
-    with get_engine().connect() as conn:
-        row = conn.execute(
-            select(review_decisions.c.id)
-            .where(
-                review_decisions.c.task_id == task_id,
-                review_decisions.c.active.is_(True),
             )
-            .order_by(review_decisions.c.id.desc())
-            .limit(1)
-        ).first()
-    if not row:
-        raise RuntimeError("Принятое решение не найдено.")
-    return int(row.id)
+
+    return {
+        "observation_ids": sorted(observation_ids),
+        "task_type": str(row.task_type),
+    }
 
 
 def submit_review_and_update_agent(
@@ -62,13 +66,26 @@ def submit_review_and_update_agent(
     reviewer: str,
     selection: dict[str, Any],
     is_admin: bool,
+    lease_token: str | None = None,
+    *,
+    wait_for_agent: bool = True,
 ) -> dict[str, Any]:
-    result = submit_review(task_id, reviewer, selection, is_admin)
+    """Сохраняет ответ как директиву; рабочую базу изменяет только агент."""
+    if lease_token:
+        validate_review_lease(task_id, reviewer, lease_token)
+
+    normalized_selection = normalize_review_selection(selection)
+    scope = _task_scope(task_id)
+    result = submit_review(task_id, reviewer, normalized_selection, is_admin)
     if not result.get("applied"):
         return result
 
-    address_ids = _affected_address_ids(task_id)
-    decision_id = _active_decision_id(task_id)
+    decision_id = int(result["decision_id"])
+    record_source_feedback(
+        scope["observation_ids"],
+        normalized_selection["decision_type"],
+    )
+    full_rebuild = is_fundamental_decision(normalized_selection)
     event_id = publish_event(
         "human_confirmed",
         "review_decision",
@@ -76,15 +93,30 @@ def submit_review_and_update_agent(
         {
             "task_id": task_id,
             "decision_id": decision_id,
-            "address_ids": address_ids,
             "reviewer": reviewer,
+            "observation_ids": scope["observation_ids"],
+            "force_full": full_rebuild,
+            "task_type": scope["task_type"],
+            "decision_type": normalized_selection["decision_type"],
         },
         deduplication_key=f"decision:{decision_id}",
     )
-    agent = run_until_event(event_id, max_events=200, worker_id="review-inline")
+    if lease_token:
+        release_review_task(task_id, reviewer, lease_token)
+
+    if wait_for_agent:
+        agent = run_until_event(event_id, max_events=500, worker_id="review-inline")
+    else:
+        agent = {
+            "target_status": "queued",
+            "processed": 0,
+            "completed": 0,
+            "failed": 0,
+        }
     return {
         **result,
-        "decision_id": decision_id,
+        "selection": normalized_selection,
+        "recalculation_scope": "full" if full_rebuild else "local",
         "agent_event_id": event_id,
         "agent_status": agent["target_status"],
         "agent_processed": agent["processed"],

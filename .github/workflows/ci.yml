@@ -3,66 +3,146 @@ name: CI
 on:
   pull_request:
   push:
-    branches: ["main", "agent/res-ai-v2", "agent/event-driven-ai-core"]
+    branches:
+      - main
+      - agent/res-ai-v2
+      - agent/event-driven-ai-core
+      - agent/knowledge-pit-v3
 
 jobs:
   test:
     runs-on: ubuntu-24.04
     steps:
-      - name: Checkout
+      - name: Checkout exact commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+
+      - name: Verify commit and initialize evidence
         env:
-          REPOSITORY: ${{ github.repository }}
-          HEAD_BRANCH: ${{ github.head_ref }}
-          REF_NAME: ${{ github.ref_name }}
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          BRANCH="${HEAD_BRANCH:-$REF_NAME}"
-          git clone -q --depth 1 --branch "$BRANCH" "https://github.com/$REPOSITORY.git" source
-          cp -a source/. .
-          rm -rf source .git
+          mkdir -p artifacts/ci
+          ACTUAL_SHA="$(git rev-parse HEAD)"
+          printf 'expected_sha=%s\nactual_sha=%s\n' "$EXPECTED_SHA" "$ACTUAL_SHA" | tee artifacts/ci/commit.txt
+          test "$ACTUAL_SHA" = "$EXPECTED_SHA"
+          printf 'command\texit_code\n' > artifacts/ci/commands.tsv
+
       - name: Create environment
         run: |
-          python3 -m venv .venv
-          .venv/bin/pip install -q --upgrade pip
-          .venv/bin/pip install -q -r requirements.txt -r requirements-dev.txt
+          set +e
+          python3 -m venv .venv 2>&1 | tee artifacts/ci/venv.log
+          CODE=${PIPESTATUS[0]}
+          printf 'python3 -m venv .venv\t%s\n' "$CODE" >> artifacts/ci/commands.tsv
+          test "$CODE" -eq 0 || exit "$CODE"
+          .venv/bin/pip install -q --upgrade pip 2>&1 | tee -a artifacts/ci/venv.log
+          CODE=${PIPESTATUS[0]}
+          printf '.venv/bin/pip install -q --upgrade pip\t%s\n' "$CODE" >> artifacts/ci/commands.tsv
+          test "$CODE" -eq 0 || exit "$CODE"
+          .venv/bin/pip install -q -r requirements.txt -r requirements-dev.txt 2>&1 | tee -a artifacts/ci/venv.log
+          CODE=${PIPESTATUS[0]}
+          printf '.venv/bin/pip install -q -r requirements.txt -r requirements-dev.txt\t%s\n' "$CODE" >> artifacts/ci/commands.tsv
+          exit "$CODE"
+
       - name: Lint
-        run: .venv/bin/ruff check .
+        run: |
+          set +e
+          .venv/bin/ruff check . 2>&1 | tee artifacts/ci/ruff.log
+          CODE=${PIPESTATUS[0]}
+          printf '.venv/bin/ruff check .\t%s\n' "$CODE" >> artifacts/ci/commands.tsv
+          exit "$CODE"
+
       - name: Tests
-        run: .venv/bin/pytest
+        run: |
+          set +e
+          .venv/bin/pytest -vv --junitxml=artifacts/ci/pytest.xml 2>&1 | tee artifacts/ci/pytest.log
+          CODE=${PIPESTATUS[0]}
+          printf '.venv/bin/pytest -vv --junitxml=artifacts/ci/pytest.xml\t%s\n' "$CODE" >> artifacts/ci/commands.tsv
+          exit "$CODE"
+
+      - name: Load test 50000
+        if: github.head_ref == 'agent/knowledge-pit-v3' || github.ref_name == 'agent/knowledge-pit-v3'
+        env:
+          RES_AI_ALLOW_SQLITE: "1"
+          RES_AI_DISABLE_BACKGROUND_WORKER: "1"
+        run: |
+          set +e
+          .venv/bin/python scripts/load_test_50000.py 2>&1 | tee artifacts/ci/load-50000.log
+          CODE=${PIPESTATUS[0]}
+          printf '.venv/bin/python scripts/load_test_50000.py\t%s\n' "$CODE" >> artifacts/ci/commands.tsv
+          exit "$CODE"
+
+      - name: Load test 200000
+        if: github.head_ref == 'agent/knowledge-pit-v3' || github.ref_name == 'agent/knowledge-pit-v3'
+        env:
+          DATABASE_URL: "sqlite:////tmp/res-ai-load-200000.db"
+          ADMIN_PASSWORD: "load-admin"
+          RES_AI_ALLOW_SQLITE: "1"
+          RES_AI_DISABLE_BACKGROUND_WORKER: "1"
+        run: |
+          set +e
+          rm -f /tmp/res-ai-load-200000.db
+          .venv/bin/python scripts/run_load_pipeline.py --rows 200000 --output artifacts/ci/load-200000.json 2>&1 | tee artifacts/ci/load-200000.log
+          CODE=${PIPESTATUS[0]}
+          printf '.venv/bin/python scripts/run_load_pipeline.py --rows 200000 --output artifacts/ci/load-200000.json\t%s\n' "$CODE" >> artifacts/ci/commands.tsv
+          exit "$CODE"
+
       - name: Compile
-        run: .venv/bin/python -m compileall -q app.py res_ai_v2 tests
+        run: |
+          set +e
+          .venv/bin/python -m compileall -q app.py res_ai_v2 tests scripts 2>&1 | tee artifacts/ci/compile.log
+          CODE=${PIPESTATUS[0]}
+          printf '.venv/bin/python -m compileall -q app.py res_ai_v2 tests scripts\t%s\n' "$CODE" >> artifacts/ci/commands.tsv
+          exit "$CODE"
+
       - name: Streamlit startup
         env:
           RES_AI_ALLOW_SQLITE: "1"
           ADMIN_PASSWORD: "ci-admin"
         run: |
-          .venv/bin/streamlit run app.py --server.headless true --server.port 8501 > /tmp/streamlit.log 2>&1 &
+          set +e
+          .venv/bin/streamlit run app.py --server.headless true --server.port 8501 > artifacts/ci/streamlit.log 2>&1 &
           PID=$!
+          CODE=1
           for attempt in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:8501/_stcore/health >/dev/null; then
-              kill "$PID"
-              wait "$PID" || true
-              exit 0
+            if curl -fsS http://127.0.0.1:8501/_stcore/health > artifacts/ci/streamlit-health.txt; then
+              CODE=0
+              break
             fi
             sleep 1
           done
-          cat /tmp/streamlit.log
-          kill "$PID" || true
-          exit 1
+          kill "$PID" 2>/dev/null || true
+          wait "$PID" 2>/dev/null || true
+          printf 'streamlit health check\t%s\n' "$CODE" >> artifacts/ci/commands.tsv
+          exit "$CODE"
+
       - name: API startup
         env:
           RES_AI_ALLOW_SQLITE: "1"
           ADMIN_PASSWORD: "ci-admin"
         run: |
-          .venv/bin/uvicorn res_ai_v2.api:app --host 127.0.0.1 --port 8000 > /tmp/api.log 2>&1 &
+          set +e
+          .venv/bin/uvicorn res_ai_v2.api:app --host 127.0.0.1 --port 8000 > artifacts/ci/api.log 2>&1 &
           PID=$!
+          CODE=1
           for attempt in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:8000/v1/health >/dev/null; then
-              kill "$PID"
-              wait "$PID" || true
-              exit 0
+            if curl -fsS http://127.0.0.1:8000/v1/health > artifacts/ci/api-health.json; then
+              CODE=0
+              break
             fi
             sleep 1
           done
-          cat /tmp/api.log
-          kill "$PID" || true
-          exit 1
+          kill "$PID" 2>/dev/null || true
+          wait "$PID" 2>/dev/null || true
+          printf 'uvicorn /v1/health\t%s\n' "$CODE" >> artifacts/ci/commands.tsv
+          exit "$CODE"
+
+      - name: Upload CI evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: res-ai-ci-evidence-${{ github.event.pull_request.head.sha || github.sha }}
+          path: artifacts/ci
+          if-no-files-found: error
+          retention-days: 30

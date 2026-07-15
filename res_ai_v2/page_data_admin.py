@@ -3,10 +3,11 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+from .display_names import short_executor_name
 from .import_service import import_plan
 from .importer import FIELD_LABELS, inspect_excel
 from .quality import dashboard
-from .repositories import backup_snapshot, browse_knowledge
+from .repositories import browse_knowledge
 from .structure import CURRENT_STRUCTURE
 from .ui_labels import source_kind_label, status_label
 
@@ -17,14 +18,14 @@ def page_home() -> None:
     cols = st.columns(4)
     cols[0].metric("Адресов", values["addresses"])
     cols[1].metric("Связей адрес–РЭС", values["mappings"])
-    cols[2].metric("Под вопросом", values["open_tasks"])
+    cols[2].metric("На проверке", values["open_tasks"])
     cols[3].metric("Противоречий", values["conflicts"])
     cols = st.columns(4)
-    cols[0].metric("Проверено человеком", values["human_verified"])
-    cols[1].metric("Размеченных текстов", values["text_examples"])
-    cols[2].metric("Статус модели", values["model_status"])
+    cols[0].metric("Решений людей", values["human_verified"])
+    cols[1].metric("Текстов", values["text_examples"])
+    cols[2].metric("Модель", values["model_status"])
     cols[3].metric(
-        "Точность модели",
+        "Точность",
         "—" if values["model_accuracy"] is None else f"{values['model_accuracy']:.2f}%",
     )
 
@@ -33,37 +34,37 @@ def _preview(plan) -> pd.DataFrame:
     rows = []
     for sheet in plan.sheets:
         rows.extend(sheet.rows[:20])
-    columns = ["branch", "res", "locality", "district", "settlement", "street", "text"]
-    labels = {
-        "branch": "Филиал",
-        "res": "РЭС",
-        "locality": "Населенный пункт",
-        "district": "Район",
-        "settlement": "СНТ / поселок",
-        "street": "Улица",
-        "text": "Исходный текст",
-    }
-    return pd.DataFrame([{labels[key]: row.get(key, "") for key in columns} for row in rows])
+    result = pd.DataFrame(
+        [
+            {
+                "Филиал": short_executor_name(str(row.get("branch", ""))),
+                "РЭС": short_executor_name(str(row.get("res", ""))),
+                "Населенный пункт": row.get("locality", ""),
+                "Район": row.get("district", ""),
+                "СНТ / поселок": row.get("settlement", ""),
+                "Улица": row.get("street", ""),
+                "Исходный текст": row.get("text", ""),
+            }
+            for row in rows
+        ]
+    )
+    return result
 
 
 def page_upload() -> None:
     st.header("Загрузка")
-    st.write(
-        "Загрузите любой Excel. Система сама ищет заголовки и определяет назначение столбцов по названиям и содержимому."
-    )
+    st.caption("Загрузите Excel. Столбцы система распознает сама.")
     uploaded = st.file_uploader("Excel-файл", type=["xlsx", "xls"])
     if not uploaded:
         return
-    content = uploaded.getvalue()
     try:
-        plan = inspect_excel(content, uploaded.name)
+        plan = inspect_excel(uploaded.getvalue(), uploaded.name)
     except Exception as exc:
         st.error(str(exc))
         return
-    st.success(f"Распознано строк: {plan.detected_rows}. Тип данных: {source_kind_label(plan.source_kind)}.")
-    if plan.warnings:
-        for warning in plan.warnings:
-            st.warning(warning)
+    st.success(f"Распознано: {plan.detected_rows}. Тип: {source_kind_label(plan.source_kind)}.")
+    for warning in plan.warnings:
+        st.warning(warning)
     for sheet in plan.sheets:
         with st.expander(f"Лист: {sheet.sheet_name}", expanded=bool(sheet.warnings)):
             rows = [
@@ -76,43 +77,42 @@ def page_upload() -> None:
             ]
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
     st.dataframe(_preview(plan), use_container_width=True, hide_index=True)
-    if st.button("Сохранить в постоянную базу и проанализировать", type="primary", use_container_width=True):
+    if st.button("Загрузить", type="primary", use_container_width=True):
         try:
-            with st.spinner("Сохраняю данные и формирую сомнения..."):
-                result = import_plan(plan)
+            with st.spinner("Сохраняю файл..."):
+                result = import_plan(plan, wait_for_agent=False)
         except Exception as exc:
             st.error(f"Ошибка загрузки: {exc}")
             return
         if result["already_loaded"]:
-            st.info("Этот файл уже был загружен. Счетчики и обучение не изменены.")
-        else:
-            cols = st.columns(4)
-            cols[0].metric("Распознано", result["seen"])
-            cols[1].metric("Добавлено", result["imported"])
-            cols[2].metric("Дубли внутри файла", result["duplicates"])
-            cols[3].metric("Требуют уточнения", result["issues"])
-            st.success("Данные сохранены в Neon и автоматически проанализированы агентом.")
+            st.info("Этот файл уже загружен.")
+            return
+        cols = st.columns(3)
+        cols[0].metric("Строк", result["seen"])
+        cols[1].metric("Новых", result["imported"])
+        cols[2].metric("Повторов", result["duplicates"])
+        st.success("Файл сохранен. Агент анализирует его в фоне.")
 
 
 def page_knowledge() -> None:
     st.header("База знаний")
     cols = st.columns(4)
-    search = cols[0].text_input("Поиск по адресу")
+    search = cols[0].text_input("Поиск")
     statuses = ["", "source_only", "consistent", "human_verified", "conflict", "rejected"]
     status = cols[1].selectbox(
         "Статус",
         statuses,
-        format_func=lambda value: "Все статусы" if value == "" else status_label(value),
+        format_func=lambda value: "Все" if value == "" else status_label(value),
     )
     branch = cols[2].selectbox(
         "Филиал",
         [""] + sorted(set(CURRENT_STRUCTURE.values())),
-        format_func=lambda value: "Все филиалы" if value == "" else value,
+        format_func=lambda value: "Все" if value == "" else short_executor_name(value),
     )
     res = cols[3].selectbox(
         "РЭС",
         [""] + list(CURRENT_STRUCTURE),
-        format_func=lambda value: "Все РЭС" if value == "" else value,
+        format_func=lambda value: "Все" if value == "" else short_executor_name(value),
     )
     rows = browse_knowledge(search, status, branch, res)
     rename = {
@@ -123,34 +123,16 @@ def page_knowledge() -> None:
         "settlement": "СНТ / поселок",
         "street": "Улица",
         "status": "Статус",
-        "source_confidence": "Доверие источнику",
-        "human_confirmations": "Подтверждений",
+        "source_confidence": "Доверие",
+        "human_confirmations": "Решений",
     }
     if rows:
         frame = pd.DataFrame(rows).rename(columns=rename)
+        frame["Филиал"] = frame["Филиал"].map(short_executor_name)
+        frame["РЭС"] = frame["РЭС"].map(short_executor_name)
         frame["Статус"] = frame["Статус"].map(status_label)
-        frame["Доверие источнику"] = frame["Доверие источнику"].map(
-            lambda value: f"{float(value):.1f}%"
-        )
+        frame["Доверие"] = frame["Доверие"].map(lambda value: f"{float(value):.1f}%")
         frame = frame[list(rename.values())]
     else:
         frame = pd.DataFrame(columns=list(rename.values()))
     st.dataframe(frame, use_container_width=True, hide_index=True)
-
-
-def page_settings() -> None:
-    st.header("Настройки")
-    st.subheader("Резервная копия")
-    st.write(
-        "Копия содержит базу знаний, источники, задания, голоса, решения, модели, журнал и очередь агента."
-    )
-    st.download_button(
-        "Скачать полную резервную копию",
-        backup_snapshot(),
-        "res_ai_v2_backup.json",
-        "application/json",
-        use_container_width=True,
-    )
-    st.info(
-        "Перенос данных старой версии убран из ежедневного интерфейса. Он не запускается случайным нажатием и не изменяет рабочую базу."
-    )

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import create_engine, insert, select, update
+from sqlalchemy import Integer, String, cast, create_engine, insert, select, update
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from .config import load_settings
 from .schema import executor_structure, settings
@@ -31,14 +33,15 @@ def get_engine() -> Engine:
         sqlite_path = cfg.database_url.removeprefix("sqlite:///")
         if sqlite_path and sqlite_path != ":memory:":
             Path(sqlite_path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
-    engine = create_engine(cfg.database_url, **kwargs)
-    return engine
+    return create_engine(cfg.database_url, **kwargs)
 
 
 @lru_cache(maxsize=1)
 def initialize_database() -> None:
     engine = get_engine()
+    from .domain_bootstrap import bootstrap_domain_metadata
     from .migrations import run_migrations
+    from .pit_bootstrap import BOOTSTRAP_SETTING, bootstrap_current_knowledge
 
     run_migrations(engine)
     now = utcnow()
@@ -61,16 +64,33 @@ def initialize_database() -> None:
                         updated_at=now,
                     )
                 )
-        if not conn.execute(select(settings.c.key).where(settings.c.key == "data_version")).first():
-            conn.execute(insert(settings).values(key="data_version", value="1", updated_at=now))
-        if not conn.execute(select(settings.c.key).where(settings.c.key == "human_decisions_since_training")).first():
+        defaults = {
+            "data_version": "1",
+            "human_decisions_since_training": "0",
+        }
+        for key, value in defaults.items():
+            if not conn.execute(select(settings.c.key).where(settings.c.key == key)).first():
+                conn.execute(
+                    insert(settings).values(
+                        key=key,
+                        value=value,
+                        updated_at=now,
+                    )
+                )
+
+        bootstrapped = conn.execute(
+            select(settings.c.value).where(settings.c.key == BOOTSTRAP_SETTING)
+        ).first()
+        if not bootstrapped:
+            result = bootstrap_current_knowledge(conn, now)
             conn.execute(
                 insert(settings).values(
-                    key="human_decisions_since_training",
-                    value="0",
+                    key=BOOTSTRAP_SETTING,
+                    value=f"done:{result['observations']}:{result['directives']}",
                     updated_at=now,
                 )
             )
+        bootstrap_domain_metadata(conn, now)
 
 
 def get_setting(key: str, default: str = "") -> str:
@@ -85,15 +105,71 @@ def set_setting(key: str, value: Any) -> None:
     now = utcnow()
     with get_engine().begin() as conn:
         if conn.execute(select(settings.c.key).where(settings.c.key == key)).first():
-            conn.execute(update(settings).where(settings.c.key == key).values(value=str(value), updated_at=now))
+            conn.execute(
+                update(settings)
+                .where(settings.c.key == key)
+                .values(value=str(value), updated_at=now)
+            )
         else:
-            conn.execute(insert(settings).values(key=key, value=str(value), updated_at=now))
+            conn.execute(
+                insert(settings).values(
+                    key=key,
+                    value=str(value),
+                    updated_at=now,
+                )
+            )
+
+
+def _database_busy(exc: OperationalError) -> bool:
+    text = str(exc).lower()
+    return "locked" in text or "busy" in text or "could not serialize" in text
+
+
+def increment_setting(
+    key: str,
+    amount: int = 1,
+    *,
+    default: int = 0,
+    max_attempts: int = 20,
+) -> int:
+    """Изменяет числовую настройку одной операцией без потери параллельных обновлений."""
+    initialize_database()
+    engine = get_engine()
+    for attempt in range(max(1, max_attempts)):
+        now = utcnow()
+        try:
+            with engine.begin() as conn:
+                if not conn.execute(select(settings.c.key).where(settings.c.key == key)).first():
+                    try:
+                        with conn.begin_nested():
+                            conn.execute(
+                                insert(settings).values(
+                                    key=key,
+                                    value=str(default),
+                                    updated_at=now,
+                                )
+                            )
+                    except IntegrityError:
+                        pass
+                numeric_value = cast(settings.c.value, Integer) + int(amount)
+                result = conn.execute(
+                    update(settings)
+                    .where(settings.c.key == key)
+                    .values(value=cast(numeric_value, String), updated_at=now)
+                )
+                if result.rowcount != 1:
+                    raise RuntimeError(f"Не удалось обновить общий счетчик {key!r}.")
+                value = conn.scalar(select(settings.c.value).where(settings.c.key == key))
+                return int(value)
+        except OperationalError as exc:
+            if not _database_busy(exc) or attempt + 1 >= max_attempts:
+                raise
+            time.sleep(min(0.01 * (attempt + 1), 0.2))
+    raise RuntimeError(f"Не удалось обновить общий счетчик {key!r}.")
 
 
 def bump_data_version() -> int:
-    current = int(get_setting("data_version", "1")) + 1
-    set_setting("data_version", current)
-    return current
+    return increment_setting("data_version", 1, default=1)
 
 
 def storage_name() -> str:

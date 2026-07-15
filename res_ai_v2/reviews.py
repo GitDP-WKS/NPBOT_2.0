@@ -3,40 +3,76 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from sqlalchemy import delete, func, insert, select, update
+from sqlalchemy import delete, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
-from .config import load_settings
-from .db import bump_data_version, get_engine, initialize_database, utcnow
-from .normalize import normalize_text, stable_json
+from .db import bump_data_version, get_engine, get_setting, initialize_database, utcnow
+from .event_bus import publish_event
+from .normalize import normalize_text, sha256_parts, stable_json
+from .pit_schema import knowledge_directives
 from .repositories import audit, increment_human_decisions
-from .review_helpers import _apply
-from .schema import address_mappings, query_rules, review_decisions, review_tasks, review_votes, text_examples
+from .schema import review_decisions, review_tasks, review_votes
 
 
-def submit_review(task_id: int, reviewer: str, selection: dict[str, Any], is_admin: bool) -> dict[str, Any]:
-    actor, reviewer_key = " ".join(reviewer.strip().split()), normalize_text(reviewer)
+def _evidence_signature(task: dict[str, Any]) -> str:
+    payload = json.loads(str(task.get("payload_json", "{}")) or "{}")
+    options = [
+        {
+            "res": str(option.get("res", "")),
+            "district": str(option.get("district", "")),
+            "occurrences": int(option.get("occurrences", 0) or 0),
+        }
+        for option in payload.get("options", [])
+    ]
+    options.sort(key=lambda item: (item["res"], item["district"], item["occurrences"]))
+    return sha256_parts(
+        [
+            str(task.get("task_type", "")),
+            str(task.get("subject_key", "")),
+            stable_json(payload.get("address") or {}),
+            stable_json(options),
+            str(payload.get("raw_text", "")),
+        ]
+    )
+
+
+def submit_review(
+    task_id: int,
+    reviewer: str,
+    selection: dict[str, Any],
+    is_admin: bool,
+) -> dict[str, Any]:
+    """Сохраняет одно решение как директиву агенту."""
+    actor = " ".join(reviewer.strip().split())
+    reviewer_key = normalize_text(reviewer)
     if not reviewer_key:
         raise ValueError("Укажите имя проверяющего.")
     initialize_database()
     encoded = stable_json(selection)
-    required = load_settings().review_votes_required
-    applied = False
-    votes = 0
     task_title = ""
     task_type = ""
-    before: dict[str, Any] = {}
-    after: dict[str, Any] = {}
+    decision_id = 0
+    directive_id = 0
+    directive_version = int(get_setting("data_version", "1")) + 2
 
     with get_engine().begin() as conn:
         row = conn.execute(
-            select(review_tasks).where(review_tasks.c.id == task_id, review_tasks.c.status == "open")
+            select(review_tasks).where(
+                review_tasks.c.id == task_id,
+                review_tasks.c.status == "open",
+            )
         ).first()
         if not row:
-            return {"applied": False, "votes": 0, "message": "Задание уже закрыто."}
+            return {
+                "applied": False,
+                "votes": 0,
+                "required": 1,
+                "message": "Задание уже закрыто.",
+            }
         task = dict(row._mapping)
         task_title = str(task.get("title", ""))
         task_type = str(task.get("task_type", ""))
+        evidence_signature = _evidence_signature(task)
         try:
             conn.execute(
                 insert(review_votes).values(
@@ -50,42 +86,44 @@ def submit_review(task_id: int, reviewer: str, selection: dict[str, Any], is_adm
         except IntegrityError as exc:
             raise ValueError("Вы уже проверяли это задание.") from exc
 
-        votes = (
-            1
-            if is_admin
-            else int(
-                conn.scalar(
-                    select(func.count())
-                    .select_from(review_votes)
-                    .where(
-                        review_votes.c.task_id == task_id,
-                        review_votes.c.selection_json == encoded,
-                        review_votes.c.is_admin.is_(False),
-                    )
-                )
-                or 0
-            )
+        now = utcnow()
+        conn.execute(
+            update(review_tasks)
+            .where(review_tasks.c.id == task_id)
+            .values(status="closed", updated_at=now)
         )
-        applied = bool(is_admin or votes >= required)
-        if applied:
-            before, after = _apply(conn, task, selection, actor, votes)
-            conn.execute(
-                update(review_tasks)
-                .where(review_tasks.c.id == task_id)
-                .values(status="closed", updated_at=utcnow())
-            )
+        decision_id = int(
             conn.execute(
                 insert(review_decisions).values(
                     task_id=task_id,
                     selection_json=encoded,
                     applied_by=actor,
-                    before_json=stable_json(before),
-                    after_json=stable_json(after),
+                    before_json="{}",
+                    after_json=encoded,
                     active=True,
-                    created_at=utcnow(),
+                    created_at=now,
                     reversed_at=None,
                 )
-            )
+            ).inserted_primary_key[0]
+        )
+        directive_key = sha256_parts(["review_decision", str(decision_id)])
+        directive_id = int(
+            conn.execute(
+                insert(knowledge_directives).values(
+                    directive_key=directive_key,
+                    task_id=task_id,
+                    subject_type=str(task.get("subject_type", "task")),
+                    subject_key=str(task.get("subject_key", task_id)),
+                    selection_json=encoded,
+                    evidence_signature=evidence_signature,
+                    actor=actor,
+                    source_version=directive_version,
+                    active=True,
+                    created_at=now,
+                    revoked_at=None,
+                )
+            ).inserted_primary_key[0]
+        )
 
     audit(
         actor,
@@ -99,19 +137,35 @@ def submit_review(task_id: int, reviewer: str, selection: dict[str, Any], is_adm
             "task_type": task_type,
             "selection": selection,
             "is_admin": is_admin,
-            "votes": votes,
-            "required": required,
-            "applied": applied,
+            "votes": 1,
+            "required": 1,
+            "applied": True,
+            "decision_id": decision_id,
+            "directive_id": directive_id,
         },
     )
-    if applied:
-        increment_human_decisions()
-        bump_data_version()
-        audit(actor, "apply_review", "review_task", str(task_id), before, after)
-    return {"applied": applied, "votes": votes, "required": required}
+    increment_human_decisions()
+    bump_data_version()
+    audit(
+        actor,
+        "apply_review",
+        "review_task",
+        str(task_id),
+        {},
+        {"selection": selection, "directive_id": directive_id},
+    )
+    return {
+        "applied": True,
+        "votes": 1,
+        "required": 1,
+        "decision_id": decision_id,
+        "directive_id": directive_id,
+    }
 
 
 def undo_decision(decision_id: int, actor: str = "Администратор") -> None:
+    initialize_database()
+    task_id = 0
     with get_engine().begin() as conn:
         row = conn.execute(
             select(review_decisions).where(
@@ -122,108 +176,46 @@ def undo_decision(decision_id: int, actor: str = "Администратор") -
         if not row:
             raise ValueError("Активное решение не найдено.")
         decision = dict(row._mapping)
-        before = json.loads(str(decision["before_json"]) or "{}")
         task_id = int(decision["task_id"])
-        for mapping in before.get("mappings", []):
-            values = {
-                key: mapping[key]
-                for key in (
-                    "status",
-                    "source_confidence",
-                    "human_confirmations",
-                    "active",
-                    "branch_name",
-                    "res_name",
-                )
-                if key in mapping
-            }
-            values["updated_at"] = utcnow()
-            conn.execute(
-                update(address_mappings)
-                .where(address_mappings.c.id == int(mapping["id"]))
-                .values(**values)
+        now = utcnow()
+        conn.execute(
+            update(knowledge_directives)
+            .where(
+                knowledge_directives.c.task_id == task_id,
+                knowledge_directives.c.active.is_(True),
             )
-        if before.get("created_mapping_ids"):
-            conn.execute(
-                delete(address_mappings).where(
-                    address_mappings.c.id.in_([int(x) for x in before["created_mapping_ids"]])
-                )
-            )
-        if before.get("created_text_ids"):
-            conn.execute(
-                delete(text_examples).where(
-                    text_examples.c.id.in_([int(x) for x in before["created_text_ids"]])
-                )
-            )
-        for example in before.get("previous_texts", []):
-            conn.execute(
-                update(text_examples)
-                .where(text_examples.c.id == int(example["id"]))
-                .values(
-                    **{
-                        key: example[key]
-                        for key in (
-                            "raw_text",
-                            "normalized_text",
-                            "address_id",
-                            "res_name",
-                            "branch_name",
-                            "status",
-                            "human_confirmations",
-                            "weight",
-                            "updated_at",
-                        )
-                        if key in example
-                    }
-                )
-            )
-        task = conn.execute(select(review_tasks).where(review_tasks.c.id == task_id)).first()
-        payload = json.loads(str(task.payload_json) or "{}") if task else {}
-        normalized = normalize_text(str(payload.get("query_text", "")))
-        if normalized:
-            old = before.get("query_rule")
-            if old:
-                conn.execute(
-                    update(query_rules)
-                    .where(query_rules.c.normalized_query == normalized)
-                    .values(
-                        raw_query=old["raw_query"],
-                        selection_json=old["selection_json"],
-                        created_by=old["created_by"],
-                        updated_at=utcnow(),
-                    )
-                )
-            else:
-                conn.execute(delete(query_rules).where(query_rules.c.normalized_query == normalized))
+            .values(active=False, revoked_at=now)
+        )
         conn.execute(
             update(review_tasks)
             .where(review_tasks.c.id == task_id)
-            .values(status="open", updated_at=utcnow())
+            .values(status="open", updated_at=now)
         )
         conn.execute(delete(review_votes).where(review_votes.c.task_id == task_id))
         conn.execute(
             update(review_decisions)
             .where(review_decisions.c.id == decision_id)
-            .values(active=False, reversed_at=utcnow())
+            .values(active=False, reversed_at=now)
         )
+
     bump_data_version()
+    event_id = publish_event(
+        "knowledge_directive_revoked",
+        "review_decision",
+        str(decision_id),
+        {"task_id": task_id, "actor": actor},
+        deduplication_key=f"undo:{decision_id}",
+    )
+    from .agent import run_until_event
+
+    result = run_until_event(event_id, max_events=500, worker_id="undo-inline")
+    if result["target_status"] != "completed":
+        raise RuntimeError("Агент не смог перестроить базу после отмены решения.")
     audit(actor, "undo_review", "review_decision", str(decision_id), decision, {})
 
 
 def recent_votes(limit: int = 300) -> list[dict[str, Any]]:
     initialize_database()
-    other_votes = review_votes.alias("other_votes")
-    matching_votes = (
-        select(func.count())
-        .select_from(other_votes)
-        .where(
-            other_votes.c.task_id == review_votes.c.task_id,
-            other_votes.c.selection_json == review_votes.c.selection_json,
-            other_votes.c.is_admin.is_(False),
-        )
-        .correlate(review_votes)
-        .scalar_subquery()
-    )
     query = (
         select(
             review_votes.c.id,
@@ -235,13 +227,11 @@ def recent_votes(limit: int = 300) -> list[dict[str, Any]]:
             review_tasks.c.title,
             review_tasks.c.task_type,
             review_tasks.c.status.label("task_status"),
-            matching_votes.label("matching_votes"),
         )
         .select_from(review_votes.join(review_tasks, review_votes.c.task_id == review_tasks.c.id))
         .order_by(review_votes.c.id.desc())
         .limit(limit)
     )
-    required = load_settings().review_votes_required
     result: list[dict[str, Any]] = []
     with get_engine().connect() as conn:
         for row in conn.execute(query):
@@ -263,12 +253,8 @@ def recent_votes(limit: int = 300) -> list[dict[str, Any]]:
                 if value:
                     changes.append(f"{label}: {value}")
             item["address_changes"] = "; ".join(changes) or "Без изменения адреса"
-            item["vote_progress"] = (
-                "Решение администратора"
-                if item["is_admin"]
-                else f"{int(item['matching_votes'])} из {required} одинаковых голосов"
-            )
-            item["result"] = "Применено" if item["task_status"] == "closed" else "Ожидает подтверждений"
+            item["vote_progress"] = "Решение принято"
+            item["result"] = "Передано агенту" if item["task_status"] == "closed" else "Ожидает"
             result.append(item)
     return result
 
@@ -286,7 +272,9 @@ def recent_decisions(limit: int = 100) -> list[dict[str, Any]]:
                 review_tasks.c.title,
                 review_tasks.c.task_type,
             )
-            .select_from(review_decisions.join(review_tasks, review_decisions.c.task_id == review_tasks.c.id))
+            .select_from(
+                review_decisions.join(review_tasks, review_decisions.c.task_id == review_tasks.c.id)
+            )
             .order_by(review_decisions.c.id.desc())
             .limit(limit)
         )

@@ -6,14 +6,17 @@ from sqlalchemy import insert, select, update
 
 from .agent import run_until_event
 from .db import bump_data_version, get_engine, initialize_database, utcnow
+from .domain_ingest import reconcile_domain_evidence
 from .event_bus import publish_event
 from .importer import ImportPlan, canonical_row_key
-from .normalize import normalize_entity, normalize_text, row_hash, sha256_parts, stable_json
-from .repositories import audit, create_or_update_task
-from .schema import address_mappings, addresses, mapping_evidence, source_files, source_rows, text_examples
-from .structure import CURRENT_STRUCTURE, canonical_executor
+from .normalize import row_hash, sha256_parts, stable_json
+from .pit_store import ingest_pit_rows
+from .repositories import audit
+from .schema import source_files, source_rows
+from .structure import canonical_executor
+from .synchronization import agent_lock
 
-BATCH = 500
+BATCH = 1000
 
 
 def chunks(values: list[Any], size: int = BATCH):
@@ -21,29 +24,21 @@ def chunks(values: list[Any], size: int = BATCH):
         yield values[start : start + size]
 
 
-def _existing(conn, column, values: list[Any]) -> set[Any]:
-    result: set[Any] = set()
-    for batch in chunks(values, 1000):
-        result.update(conn.scalars(select(column).where(column.in_(batch))))
-    return result
+def _already_loaded(plan: ImportPlan) -> dict[str, Any]:
+    return {
+        "already_loaded": True,
+        "seen": plan.detected_rows,
+        "imported": 0,
+        "duplicates": plan.detected_rows,
+        "technical_duplicates": plan.detected_rows,
+        "independent_evidence": 0,
+        "issues": 0,
+        "analysis": None,
+        "event_id": None,
+    }
 
 
-def import_plan(plan: ImportPlan, actor: str = "Администратор") -> dict[str, Any]:
-    initialize_database()
-    engine, now = get_engine(), utcnow()
-    with engine.connect() as conn:
-        if conn.execute(
-            select(source_files.c.id).where(source_files.c.file_hash == plan.file_hash)
-        ).first():
-            return {
-                "already_loaded": True,
-                "seen": plan.detected_rows,
-                "imported": 0,
-                "duplicates": plan.detected_rows,
-                "issues": 0,
-                "analysis": None,
-            }
-
+def _prepare_rows(plan: ImportPlan) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for sheet in plan.sheets:
         for source in sheet.rows:
@@ -52,263 +47,150 @@ def import_plan(plan: ImportPlan, actor: str = "Администратор") -> 
                 row.get("branch"), row.get("res")
             )
             row["sheet_name"] = sheet.sheet_name
+            row["canonical_hash"] = canonical_row_key(row)
             rows.append(row)
+    return rows
 
-    unique: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        unique.setdefault(canonical_row_key(row), row)
-    issues: list[dict[str, Any]] = []
 
-    with engine.begin() as conn:
-        source_id = int(
-            conn.execute(
-                insert(source_files).values(
-                    file_hash=plan.file_hash,
-                    file_name=plan.file_name,
-                    source_kind=plan.source_kind,
-                    row_count=len(rows),
-                    imported_rows=0,
-                    status="importing",
-                    imported_at=now,
-                )
-            ).inserted_primary_key[0]
-        )
-        raw_payload = []
-        for row in rows:
-            raw = row.get("raw", {})
-            raw_payload.append(
+def _store_plan(
+    plan: ImportPlan,
+    rows: list[dict[str, Any]],
+) -> tuple[int, dict[str, Any]] | None:
+    engine = get_engine()
+    lock_key = f"file-import:{sha256_parts([plan.file_hash])}"
+    with agent_lock(
+        lock_key,
+        lease_seconds=900,
+        wait_seconds=30.0,
+        poll_seconds=0.03,
+    ):
+        now = utcnow()
+        with engine.begin() as conn:
+            if conn.execute(
+                select(source_files.c.id).where(source_files.c.file_hash == plan.file_hash)
+            ).first():
+                return None
+
+            source_id = int(
+                conn.execute(
+                    insert(source_files).values(
+                        file_hash=plan.file_hash,
+                        file_name=plan.file_name,
+                        source_kind=plan.source_kind,
+                        row_count=len(rows),
+                        imported_rows=0,
+                        status="importing",
+                        imported_at=now,
+                    )
+                ).inserted_primary_key[0]
+            )
+            raw_payload = [
                 {
                     "source_file_id": source_id,
                     "sheet_name": str(row.get("sheet_name", "")),
                     "row_number": int(row.get("row_number", 0)),
-                    "raw_json": stable_json(raw),
-                    "raw_hash": row_hash(raw),
-                    "canonical_hash": canonical_row_key(row),
+                    "raw_json": stable_json(row.get("raw", {})),
+                    "raw_hash": row_hash(row.get("raw", {})),
+                    "canonical_hash": str(row["canonical_hash"]),
                     "created_at": now,
                 }
-            )
-        for batch in chunks(raw_payload):
-            conn.execute(insert(source_rows), batch)
-        source_ids = {
-            (str(item.canonical_hash), int(item.row_number), str(item.sheet_name)): int(item.id)
-            for item in conn.execute(
-                select(
-                    source_rows.c.id,
-                    source_rows.c.canonical_hash,
-                    source_rows.c.row_number,
-                    source_rows.c.sheet_name,
-                ).where(source_rows.c.source_file_id == source_id)
-            )
-        }
+                for row in rows
+            ]
+            for batch in chunks(raw_payload):
+                if batch:
+                    conn.execute(insert(source_rows), batch)
 
-        address_payload: dict[str, dict[str, Any]] = {}
-        canonical_to_address: dict[str, str] = {}
-        for canonical_hash, row in unique.items():
-            locality, district = str(row.get("locality", "")), str(row.get("district", ""))
-            settlement, street = str(row.get("settlement", "")), str(row.get("street", ""))
-            if not (locality or settlement):
-                continue
-            keys = [normalize_entity(value) for value in (locality, district, settlement, street)]
-            address_key = sha256_parts(keys)
-            canonical_to_address[canonical_hash] = address_key
-            address_payload[address_key] = {
-                "address_key": address_key,
-                "locality": locality,
-                "district": district,
-                "settlement": settlement,
-                "street": street,
-                "locality_key": keys[0],
-                "district_key": keys[1],
-                "settlement_key": keys[2],
-                "street_key": keys[3],
-                "created_at": now,
-                "updated_at": now,
-            }
-        address_keys = list(address_payload)
-        existing_address_keys = _existing(conn, addresses.c.address_key, address_keys)
-        for batch in chunks(
-            [item for key, item in address_payload.items() if key not in existing_address_keys]
-        ):
-            conn.execute(insert(addresses), batch)
-        address_ids: dict[str, int] = {}
-        for batch in chunks(address_keys, 1000):
-            address_ids.update(
-                {
-                    str(item.address_key): int(item.id)
-                    for item in conn.execute(
-                        select(addresses.c.id, addresses.c.address_key).where(
-                            addresses.c.address_key.in_(batch)
-                        )
-                    )
-                }
-            )
-
-        wanted: dict[tuple[int, str], dict[str, Any]] = {}
-        for canonical_hash, row in unique.items():
-            address_id = address_ids.get(canonical_to_address.get(canonical_hash, ""))
-            branch, res = str(row.get("branch", "")), str(row.get("res", ""))
-            if address_id and res in CURRENT_STRUCTURE and branch:
-                wanted[(address_id, res)] = {
-                    "address_id": address_id,
-                    "res_name": res,
-                    "branch_name": branch,
-                    "status": "source_only",
-                    "source_confidence": 80.0,
-                    "human_confirmations": 0,
-                    "active": True,
-                    "created_at": now,
-                    "updated_at": now,
-                }
-            elif res or branch or row.get("text"):
-                task_key = sha256_parts(["import_issue", plan.file_hash, canonical_hash])
-                issues.append(
-                    {
-                        "task_key": task_key,
-                        "task_type": "import_issue",
-                        "subject_type": "source_row",
-                        "subject_key": canonical_hash,
-                        "title": "Строка импорта требует уточнения",
-                        "payload": {
-                            "raw": row.get("raw", {}),
-                            "detected": {
-                                key: row.get(key, "")
-                                for key in (
-                                    "branch",
-                                    "res",
-                                    "locality",
-                                    "district",
-                                    "settlement",
-                                    "street",
-                                    "text",
-                                )
-                            },
-                            "options": [],
-                            "allow_multiple": False,
-                            "allow_address_edit": True,
-                        },
-                        "priority": 90,
-                    }
-                )
-
-        wanted_address_ids = list({key[0] for key in wanted})
-        mapping_ids: dict[tuple[int, str], int] = {}
-        for batch in chunks(wanted_address_ids, 1000):
-            mapping_ids.update(
-                {
-                    (int(item.address_id), str(item.res_name)): int(item.id)
-                    for item in conn.execute(
-                        select(
-                            address_mappings.c.id,
-                            address_mappings.c.address_id,
-                            address_mappings.c.res_name,
-                        ).where(address_mappings.c.address_id.in_(batch))
-                    )
-                }
-            )
-        for batch in chunks([item for key, item in wanted.items() if key not in mapping_ids]):
-            conn.execute(insert(address_mappings), batch)
-        for batch in chunks(wanted_address_ids, 1000):
-            mapping_ids.update(
-                {
-                    (int(item.address_id), str(item.res_name)): int(item.id)
-                    for item in conn.execute(
-                        select(
-                            address_mappings.c.id,
-                            address_mappings.c.address_id,
-                            address_mappings.c.res_name,
-                        ).where(address_mappings.c.address_id.in_(batch))
-                    )
-                }
-            )
-
-        evidence_payload, text_payload = [], []
-        for canonical_hash, row in unique.items():
-            address_id = address_ids.get(canonical_to_address.get(canonical_hash, ""))
-            mapping_id = mapping_ids.get((address_id or 0, str(row.get("res", ""))))
-            source_row_id = source_ids.get(
-                (canonical_hash, int(row.get("row_number", 0)), str(row.get("sheet_name", "")))
-            )
-            if mapping_id:
-                evidence_payload.append(
-                    {
-                        "mapping_id": mapping_id,
-                        "source_row_id": source_row_id,
-                        "evidence_type": "source_row",
-                        "evidence_key": canonical_hash,
-                        "weight": 1.0,
-                        "created_at": now,
-                    }
-                )
-            text = str(row.get("text", "")).strip()
-            res = str(row.get("res", ""))
-            if text and address_id and res in CURRENT_STRUCTURE:
-                text_payload.append(
-                    {
-                        "example_hash": sha256_parts([normalize_text(text), res]),
-                        "source_row_id": source_row_id,
-                        "raw_text": text,
-                        "normalized_text": normalize_text(text),
-                        "address_id": address_id,
-                        "res_name": res,
-                        "branch_name": str(row.get("branch", "")),
-                        "status": "source_only",
-                        "human_confirmations": 0,
-                        "weight": 1.0,
-                        "created_at": now,
-                        "updated_at": now,
-                    }
-                )
-
-        if evidence_payload:
-            mapping_set = list({item["mapping_id"] for item in evidence_payload})
-            old_evidence = {
-                (int(item.mapping_id), str(item.evidence_key))
+            source_row_ids = {
+                (str(item.canonical_hash), int(item.row_number), str(item.sheet_name)): int(item.id)
                 for item in conn.execute(
-                    select(mapping_evidence.c.mapping_id, mapping_evidence.c.evidence_key).where(
-                        mapping_evidence.c.mapping_id.in_(mapping_set)
-                    )
+                    select(
+                        source_rows.c.id,
+                        source_rows.c.canonical_hash,
+                        source_rows.c.row_number,
+                        source_rows.c.sheet_name,
+                    ).where(source_rows.c.source_file_id == source_id)
                 )
             }
-            for batch in chunks(
-                [
-                    item
-                    for item in evidence_payload
-                    if (int(item["mapping_id"]), str(item["evidence_key"])) not in old_evidence
-                ]
-            ):
-                conn.execute(insert(mapping_evidence), batch)
+            pit = ingest_pit_rows(
+                conn,
+                source_file_id=source_id,
+                rows=rows,
+                source_row_ids=source_row_ids,
+                now=now,
+            )
+            domain = reconcile_domain_evidence(
+                conn,
+                source_file_id=source_id,
+                file_hash=plan.file_hash,
+                source_kind=plan.source_kind,
+                rows=rows,
+                source_row_ids=source_row_ids,
+                now=now,
+            )
+            pit.update(domain)
+            pit["occurrences"] = int(domain["accepted_evidence"])
+            conn.execute(
+                update(source_files)
+                .where(source_files.c.id == source_id)
+                .values(imported_rows=domain["accepted_evidence"], status="imported")
+            )
+        return source_id, pit
 
-        old_examples = _existing(
-            conn,
-            text_examples.c.example_hash,
-            [item["example_hash"] for item in text_payload],
-        )
-        fresh_text = [
-            item
-            for item in {item["example_hash"]: item for item in text_payload}.values()
-            if item["example_hash"] not in old_examples
-        ]
-        for batch in chunks(fresh_text):
-            conn.execute(insert(text_examples), batch)
-        conn.execute(
-            update(source_files)
-            .where(source_files.c.id == source_id)
-            .values(imported_rows=len(unique), status="imported")
-        )
 
-    for task in issues:
-        create_or_update_task(**task)
-    bump_data_version()
-    event_id = publish_event(
-        "file_imported",
-        "source_file",
-        str(source_id),
-        {"file_hash": plan.file_hash, "address_ids": sorted(set(address_ids.values()))},
-        deduplication_key=plan.file_hash,
-    )
-    agent = run_until_event(event_id, max_events=500, worker_id="import-inline")
-    event_result = agent.get("target_result") or {}
-    analysis = ((event_result.get("result") or {}).get("analysis"))
+def _idle_agent() -> dict[str, Any]:
+    return {
+        "processed": 0,
+        "completed": 0,
+        "failed": 0,
+        "target_status": "not_required",
+    }
+
+
+def import_plan(
+    plan: ImportPlan,
+    actor: str = "Администратор",
+    *,
+    wait_for_agent: bool = True,
+) -> dict[str, Any]:
+    """Сохраняет файл в яму и передает агенту только новые доказательства."""
+    initialize_database()
+    rows = _prepare_rows(plan)
+    stored = _store_plan(plan, rows)
+    if stored is None:
+        return _already_loaded(plan)
+    source_id, pit = stored
+
+    accepted = int(pit.get("accepted_evidence", 0))
+    event_id: int | None = None
+    analysis: dict[str, Any] | None = None
+    agent = _idle_agent()
+    if accepted > 0:
+        bump_data_version()
+        event_id = publish_event(
+            "pit_ingested",
+            "source_file",
+            str(source_id),
+            {
+                "file_hash": plan.file_hash,
+                "observation_ids": pit["observation_ids"],
+                "accepted_evidence": accepted,
+                "independent_evidence": pit.get("independent_evidence", 0),
+            },
+            deduplication_key=plan.file_hash,
+        )
+        if wait_for_agent:
+            agent = run_until_event(event_id, max_events=500, worker_id="import-inline")
+            event_result = agent.get("target_result") or {}
+            analysis = (event_result.get("result") or {}).get("analysis")
+        else:
+            agent = {
+                "processed": 0,
+                "completed": 0,
+                "failed": 0,
+                "target_status": "queued",
+            }
+
+    duplicate_rows = int(pit.get("technical_duplicates", 0))
     audit(
         actor,
         "import_file",
@@ -318,19 +200,24 @@ def import_plan(plan: ImportPlan, actor: str = "Администратор") -> 
         {
             "file_name": plan.file_name,
             "rows": len(rows),
-            "unique": len(unique),
-            "issues": len(issues),
+            "accepted_evidence": accepted,
+            "independent_evidence": pit.get("independent_evidence", 0),
+            "technical_duplicates": duplicate_rows,
             "event_id": event_id,
         },
     )
     return {
         "already_loaded": False,
         "seen": len(rows),
-        "imported": len(unique),
-        "duplicates": len(rows) - len(unique),
-        "issues": len(issues),
-        "text_examples": len(fresh_text),
+        "imported": accepted,
+        "duplicates": duplicate_rows,
+        "technical_duplicates": duplicate_rows,
+        "independent_evidence": int(pit.get("independent_evidence", 0)),
+        "issues": int((analysis or {}).get("tasks_created", 0)),
+        "text_examples": 0,
         "analysis": analysis,
+        "pit": pit,
+        "event_id": event_id,
         "agent": {
             "processed": agent["processed"],
             "completed": agent["completed"],
