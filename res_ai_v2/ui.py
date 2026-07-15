@@ -6,7 +6,7 @@ from typing import Any
 import streamlit as st
 
 from .background_worker import start_background_worker
-from .db import initialize_database, storage_name
+from .db import initialize_database
 from .page_agent_admin import page_agent_center
 from .page_data_admin import page_home, page_knowledge, page_upload
 from .page_journal import page_journal
@@ -87,7 +87,6 @@ def main() -> None:
             "Журнал",
             "Настройки",
         ]
-    st.sidebar.success(f"Общая база: {storage_name()}")
     page = st.sidebar.radio("Раздел", pages)
 
     status = runtime_status()
@@ -99,8 +98,8 @@ def main() -> None:
                 _start_runtime_async()
                 st.rerun()
         else:
-            st.info("Подключаю общую базу. Меню уже доступно.")
-            if st.button("Проверить подключение", use_container_width=True):
+            st.info("Система запускается.")
+            if st.button("Обновить", use_container_width=True):
                 st.rerun()
         return
 
