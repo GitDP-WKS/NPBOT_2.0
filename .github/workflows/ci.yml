@@ -83,9 +83,9 @@ jobs:
         run: |
           set +e
           rm -f /tmp/res-ai-load-200000.db
-          .venv/bin/python scripts/load_test_pipeline.py --rows 200000 --output artifacts/ci/load-200000.json 2>&1 | tee artifacts/ci/load-200000.log
+          .venv/bin/python scripts/run_load_pipeline.py --rows 200000 --output artifacts/ci/load-200000.json 2>&1 | tee artifacts/ci/load-200000.log
           CODE=${PIPESTATUS[0]}
-          printf '.venv/bin/python scripts/load_test_pipeline.py --rows 200000 --output artifacts/ci/load-200000.json\t%s\n' "$CODE" >> artifacts/ci/commands.tsv
+          printf '.venv/bin/python scripts/run_load_pipeline.py --rows 200000 --output artifacts/ci/load-200000.json\t%s\n' "$CODE" >> artifacts/ci/commands.tsv
           exit "$CODE"
 
       - name: Compile
