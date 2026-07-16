@@ -25,10 +25,14 @@ def get_engine() -> Engine:
     kwargs: dict[str, Any] = {
         "pool_pre_ping": True,
         "pool_recycle": 240,
+        "pool_timeout": 2,
         "future": True,
     }
     if cfg.database_url.startswith("postgresql"):
-        kwargs["connect_args"] = {"connect_timeout": 15}
+        kwargs["connect_args"] = {
+            "connect_timeout": 3,
+            "options": "-c statement_timeout=5000 -c lock_timeout=2000",
+        }
     elif cfg.database_url.startswith("sqlite:///"):
         sqlite_path = cfg.database_url.removeprefix("sqlite:///")
         if sqlite_path and sqlite_path != ":memory:":
@@ -173,5 +177,4 @@ def bump_data_version() -> int:
 
 
 def storage_name() -> str:
-    """Возвращает подпись хранилища без подключения к базе данных."""
     return "PostgreSQL / Neon" if get_engine().dialect.name == "postgresql" else "SQLite (локально)"
