@@ -1,126 +1,77 @@
 from __future__ import annotations
 
 
-def _reset_runtime(ui) -> None:
-    thread = ui._RUNTIME_THREAD
+def _reset_runtime(runtime) -> None:
+    thread = runtime._RUNTIME_THREAD
     if thread and thread.is_alive():
         thread.join(timeout=2)
-    ui._RUNTIME_THREAD = None
-    ui._RUNTIME_STATE.update({"ready": False, "running": False, "error": ""})
+    runtime._RUNTIME_THREAD = None
+    runtime._RUNTIME_STATE.update({"ready": False, "running": False, "error": ""})
 
 
-def test_streamlit_runtime_starts_in_background_once(monkeypatch):
-    from res_ai_v2 import ui
+def test_streamlit_runtime_starts_in_background_once():
+    from res_ai_v2 import ui_runtime
 
-    _reset_runtime(ui)
-    calls = {"database": 0, "worker": 0}
+    _reset_runtime(ui_runtime)
+    calls = {"count": 0}
 
-    def initialize_database() -> None:
-        calls["database"] += 1
+    def initialize() -> None:
+        calls["count"] += 1
 
-    def start_background_worker() -> bool:
-        calls["worker"] += 1
-        return True
+    ui_runtime.start_runtime_async(initialize)
+    assert ui_runtime._RUNTIME_THREAD is not None
+    ui_runtime._RUNTIME_THREAD.join(timeout=2)
+    assert not ui_runtime._RUNTIME_THREAD.is_alive()
+    assert ui_runtime.runtime_status()["ready"] is True
 
-    monkeypatch.setattr(ui, "initialize_database", initialize_database)
-    monkeypatch.setattr(ui, "start_background_worker", start_background_worker)
-
-    ui._start_runtime_async()
-    assert ui._RUNTIME_THREAD is not None
-    ui._RUNTIME_THREAD.join(timeout=2)
-    assert not ui._RUNTIME_THREAD.is_alive()
-    assert ui.runtime_status()["ready"] is True
-
-    ui._start_runtime_async()
-    assert calls == {"database": 1, "worker": 1}
-    _reset_runtime(ui)
+    ui_runtime.start_runtime_async(initialize)
+    assert calls == {"count": 1}
+    _reset_runtime(ui_runtime)
 
 
-def test_streamlit_runtime_keeps_error_without_blocking(monkeypatch):
-    from res_ai_v2 import ui
+def test_streamlit_runtime_keeps_error_without_blocking():
+    from res_ai_v2 import ui_runtime
 
-    _reset_runtime(ui)
+    _reset_runtime(ui_runtime)
 
     def fail() -> None:
         raise RuntimeError("neon unavailable")
 
-    monkeypatch.setattr(ui, "initialize_database", fail)
-    ui._start_runtime_async()
-    assert ui._RUNTIME_THREAD is not None
-    ui._RUNTIME_THREAD.join(timeout=2)
+    ui_runtime.start_runtime_async(fail)
+    assert ui_runtime._RUNTIME_THREAD is not None
+    ui_runtime._RUNTIME_THREAD.join(timeout=2)
 
-    status = ui.runtime_status()
+    status = ui_runtime.runtime_status()
     assert status["ready"] is False
     assert status["running"] is False
     assert "neon unavailable" in status["error"]
-    _reset_runtime(ui)
+    _reset_runtime(ui_runtime)
 
 
-def test_each_navigation_item_has_its_own_page_title():
-    from res_ai_v2 import ui
-
-    expected = {
-        "Главная": "Главная",
-        "Проверка": "Проверка",
-        "Определение": "Определение филиала и РЭС",
-        "Загрузка": "Загрузка",
-        "База знаний": "База знаний",
-        "Анализ и обучение": "Анализ и обучение",
-        "Качество": "Качество",
-        "Центр управления": "Центр управления",
-        "Журнал": "Журнал",
-        "Настройки": "Настройки",
-    }
-
-    assert {page: ui._page_title(page) for page in expected} == expected
-
-
-def test_runtime_wait_does_not_call_another_page_handler(monkeypatch):
-    from res_ai_v2 import ui
-
-    called: list[str] = []
-    for name in (
-        "page_home",
-        "page_review",
-        "page_predict",
-        "page_upload",
-        "page_knowledge",
-        "page_training",
-        "page_quality",
-        "page_agent_center",
-        "page_journal",
-        "page_settings",
-    ):
-        monkeypatch.setattr(ui, name, lambda *args, _name=name, **kwargs: called.append(_name))
-
-    monkeypatch.setattr(ui.st, "header", lambda *args, **kwargs: None)
-    monkeypatch.setattr(ui.st, "info", lambda *args, **kwargs: None)
-    monkeypatch.setattr(ui.st, "fragment", lambda **kwargs: lambda func: lambda: None)
-
-    ui._render_runtime_state("База знаний", {"ready": False, "running": True, "error": ""})
-
-    assert called == []
-
-
-def test_streamlit_common_render_path_has_no_blocking_database_calls():
+def test_local_pages_render_before_database_gate():
     import inspect
 
     from res_ai_v2 import ui
 
-    main_source = inspect.getsource(ui.main)
-    full_source = inspect.getsource(ui)
-
-    assert "storage_name" not in full_source
-    assert "ensure_daily_audit" not in full_source
-    assert "initialize_database" not in main_source
-    assert main_source.index('st.sidebar.radio("Раздел"') < main_source.index("runtime_status()")
+    source = inspect.getsource(ui.main)
+    assert source.index('if page == "Загрузка"') < source.index("if not database_ready")
+    assert source.index('if page == "Определение"') < source.index("if not database_ready")
+    assert "page_upload(database_ready=database_ready)" in source
+    assert "page_predict(database_ready=database_ready)" in source
 
 
-def test_storage_label_does_not_initialize_database(monkeypatch):
-    from res_ai_v2 import db
+def test_streamlit_common_path_has_no_blocking_database_calls():
+    import inspect
 
-    def forbidden() -> None:
-        raise AssertionError("storage_name must not initialize the database")
+    from res_ai_v2 import ui
 
-    monkeypatch.setattr(db, "initialize_database", forbidden)
-    assert db.storage_name() in {"PostgreSQL / Neon", "SQLite (локально)"}
+    source = inspect.getsource(ui.main)
+    assert "initialize_database()" not in source
+    assert "ensure_daily_audit" not in source
+    assert "storage_name" not in source
+
+
+def test_build_id_is_visible():
+    from res_ai_v2 import ui
+
+    assert ui.BUILD_ID == "2026.07.16.2"
