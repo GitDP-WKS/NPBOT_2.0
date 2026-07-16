@@ -34,7 +34,7 @@ def _preview(plan) -> pd.DataFrame:
     rows = []
     for sheet in plan.sheets:
         rows.extend(sheet.rows[:20])
-    result = pd.DataFrame(
+    return pd.DataFrame(
         [
             {
                 "Филиал": short_executor_name(str(row.get("branch", ""))),
@@ -48,10 +48,9 @@ def _preview(plan) -> pd.DataFrame:
             for row in rows
         ]
     )
-    return result
 
 
-def page_upload() -> None:
+def page_upload(*, database_ready: bool = True) -> None:
     st.header("Загрузка")
     st.caption("Загрузите Excel. Столбцы система распознает сама.")
     uploaded = st.file_uploader("Excel-файл", type=["xlsx", "xls"])
@@ -77,21 +76,25 @@ def page_upload() -> None:
             ]
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
     st.dataframe(_preview(plan), use_container_width=True, hide_index=True)
-    if st.button("Загрузить", type="primary", use_container_width=True):
-        try:
-            with st.spinner("Сохраняю файл..."):
-                result = import_plan(plan, wait_for_agent=False)
-        except Exception as exc:
-            st.error(f"Ошибка загрузки: {exc}")
-            return
-        if result["already_loaded"]:
-            st.info("Этот файл уже загружен.")
-            return
-        cols = st.columns(3)
-        cols[0].metric("Строк", result["seen"])
-        cols[1].metric("Новых", result["imported"])
-        cols[2].metric("Повторов", result["duplicates"])
-        st.success("Файл сохранен. Агент анализирует его в фоне.")
+    if not st.button("Загрузить", type="primary", use_container_width=True):
+        return
+    if not database_ready:
+        st.warning("База данных еще подключается. Файл не потерян — повторите отправку через несколько секунд.")
+        return
+    try:
+        with st.spinner("Сохраняю файл..."):
+            result = import_plan(plan, wait_for_agent=False)
+    except Exception as exc:
+        st.error(f"Ошибка загрузки: {exc}")
+        return
+    if result["already_loaded"]:
+        st.info("Этот файл уже загружен.")
+        return
+    cols = st.columns(3)
+    cols[0].metric("Строк", result["seen"])
+    cols[1].metric("Новых", result["imported"])
+    cols[2].metric("Повторов", result["duplicates"])
+    st.success("Файл сохранен. Агент анализирует его в фоне.")
 
 
 def page_knowledge() -> None:
