@@ -14,10 +14,45 @@ def _skip_key(reviewer: str) -> str:
     return f"review_skipped::{reviewer.strip().lower()}"
 
 
+def _edit_key(task_id: int) -> str:
+    return f"review_edit::{task_id}"
+
+
 def _option_label(item: dict[str, str]) -> str:
     branch = short_executor_name(item.get("branch", "").strip())
     res = short_executor_name(item.get("res", "").strip())
     return f"{res} — {branch}" if branch else res
+
+
+def _submit(
+    task: dict,
+    reviewer: str,
+    is_admin: bool,
+    selection: dict,
+    message: str,
+) -> None:
+    submit_review_and_update_agent(
+        int(task["id"]),
+        reviewer,
+        selection,
+        is_admin,
+        str(task["lease_token"]),
+        wait_for_agent=False,
+    )
+    st.session_state.pop(_edit_key(int(task["id"])), None)
+    st.session_state["flash"] = message
+    st.rerun()
+
+
+def _agent_answer(view, payload: dict) -> tuple[str, str, float]:
+    options = list(view.options)
+    first = options[0] if options else {}
+    branch = str(first.get("branch", "")).strip()
+    res = str(first.get("res", "")).strip()
+    confidence = float(payload.get("confidence", payload.get("score", 0)) or 0)
+    if confidence <= 1:
+        confidence *= 100
+    return branch, res, confidence
 
 
 def page_review(is_admin: bool, reviewer: str) -> None:
@@ -36,121 +71,144 @@ def page_review(is_admin: bool, reviewer: str) -> None:
         return
 
     if not task:
-        if skipped:
-            st.success("Других заданий сейчас нет.")
-            if st.button("Вернуть пропущенные задания"):
-                st.session_state[skip_key] = []
-                st.rerun()
-        else:
-            st.success("Заданий нет.")
+        st.success("Заданий нет.")
+        if skipped and st.button("Вернуть пропущенные", use_container_width=True):
+            st.session_state[skip_key] = []
+            st.rerun()
         return
 
     payload = dict(task.get("payload") or {})
     view = present_task(task)
     address = dict(payload.get("address") or {})
-    st.subheader(view.question)
+    branch, proposed_res, confidence = _agent_answer(view, payload)
+
+    with st.container(border=True):
+        st.subheader("Исходный адрес")
+        st.info(view.address_line)
+        raw_text = str(payload.get("query_text") or payload.get("raw_text") or "").strip()
+        if raw_text and raw_text != view.address_line:
+            st.caption(raw_text)
+
+    st.subheader("Ответ агента")
+    answer_cols = st.columns(3)
+    answer_cols[0].metric("Филиал", short_executor_name(branch) if branch else "Не определен")
+    answer_cols[1].metric("РЭС", short_executor_name(proposed_res) if proposed_res else "Не определен")
+    answer_cols[2].metric("Точность", f"{confidence:.0f}%" if confidence else "—")
     if view.explanation:
         st.caption(view.explanation)
-    st.info(view.address_line)
 
-    if payload.get("query_text") or payload.get("raw_text"):
-        with st.expander("Исходный текст"):
-            st.write(payload.get("query_text") or payload.get("raw_text"))
-
-    option_map = {_option_label(item): item["res"] for item in view.options}
-    selected_res: list[str] = []
-    if view.options:
-        labels = list(option_map)
-        if view.allow_multiple:
-            selected_labels = st.multiselect(
-                "Правильный РЭС",
-                labels,
-                placeholder="Выберите один или несколько РЭС",
-            )
-            selected_res.extend(option_map[label] for label in selected_labels)
-        else:
-            selected_label = st.radio(
-                "Правильный РЭС",
-                ["Не выбран"] + labels,
-            )
-            if selected_label != "Не выбран":
-                selected_res.append(option_map[selected_label])
-
-    with st.expander("Другой РЭС"):
-        remaining = [res for res in CURRENT_STRUCTURE if res not in selected_res]
-        other = st.selectbox(
-            "РЭС",
-            ["Не выбран"] + remaining,
-            format_func=lambda value: value
-            if value == "Не выбран"
-            else short_executor_name(value),
+    confirm_col, correct_col, insufficient_col = st.columns(3)
+    if confirm_col.button(
+        "Подтвердить",
+        type="primary",
+        use_container_width=True,
+        disabled=not bool(proposed_res),
+    ):
+        _submit(
+            task,
+            reviewer,
+            is_admin,
+            {
+                "decision_type": "confirmed",
+                "selected_res": [proposed_res],
+                "locality": str(address.get("locality", "")),
+                "district": str(address.get("district", "")),
+                "settlement": str(address.get("settlement", "")),
+                "street": str(address.get("street", "")),
+            },
+            "Ответ подтвержден. Открыто следующее задание.",
         )
-        if other != "Не выбран":
-            selected_res.append(other)
 
-    none_correct = st.checkbox("Правильного РЭС нет")
-    locality = str(address.get("locality", ""))
-    district = str(address.get("district", ""))
-    settlement = str(address.get("settlement", ""))
-    street = str(address.get("street", ""))
-    if view.allow_address_edit:
-        with st.expander("Исправить адрес"):
-            cols = st.columns(2)
-            locality = cols[0].text_input(
-                "Населенный пункт",
-                value=locality,
-                key=f"loc_{task['id']}",
-            )
-            district = cols[1].text_input(
-                "Район",
-                value=district,
-                key=f"dist_{task['id']}",
-            )
-            settlement = cols[0].text_input(
-                "СНТ / поселок",
-                value=settlement,
-                key=f"set_{task['id']}",
-            )
-            street = cols[1].text_input(
-                "Улица",
-                value=street,
-                key=f"str_{task['id']}",
-            )
-
-    if is_admin:
-        with st.expander("Сведения"):
-            st.write(f"Задание №{task['id']}")
-            st.write(f"Тип: {task.get('task_type', '')}")
-
-    left, right = st.columns([4, 1])
-    if left.button("Подтвердить", type="primary", use_container_width=True):
-        selected_res = list(dict.fromkeys(selected_res))
-        if not selected_res and not none_correct:
-            st.error("Выберите РЭС или отметьте, что правильного варианта нет.")
-            return
-        selection = {
-            "selected_res": [] if none_correct else selected_res,
-            "locality": locality,
-            "district": district,
-            "settlement": settlement,
-            "street": street,
-        }
-        try:
-            submit_review_and_update_agent(
-                int(task["id"]),
-                reviewer,
-                selection,
-                is_admin,
-                str(task["lease_token"]),
-                wait_for_agent=False,
-            )
-        except Exception as exc:
-            st.error(str(exc))
-            return
-        st.session_state["flash"] = "Решение принято."
+    if correct_col.button("Исправить", use_container_width=True):
+        st.session_state[_edit_key(int(task["id"]))] = True
         st.rerun()
 
-    if right.button("Пропустить", use_container_width=True):
+    if insufficient_col.button("Недостаточно данных", use_container_width=True):
+        _submit(
+            task,
+            reviewer,
+            is_admin,
+            {"decision_type": "insufficient_data", "selected_res": []},
+            "Задание отмечено как неполное. Открыто следующее задание.",
+        )
+
+    if st.session_state.get(_edit_key(int(task["id"]))):
+        with st.container(border=True):
+            st.subheader("Исправление ответа")
+            selected_res = st.selectbox(
+                "Правильный РЭС",
+                [""] + list(CURRENT_STRUCTURE),
+                format_func=lambda value: "Выберите РЭС"
+                if not value
+                else short_executor_name(value),
+                key=f"correct_res_{task['id']}",
+            )
+            selected_branch = CURRENT_STRUCTURE.get(selected_res, "") if selected_res else ""
+            st.text_input(
+                "Филиал",
+                value=short_executor_name(selected_branch),
+                disabled=True,
+                key=f"correct_branch_{task['id']}",
+            )
+
+            with st.expander("Исправить адрес"):
+                left, right = st.columns(2)
+                locality = left.text_input(
+                    "Населенный пункт",
+                    value=str(address.get("locality", "")),
+                    key=f"loc_{task['id']}",
+                )
+                district = right.text_input(
+                    "Район",
+                    value=str(address.get("district", "")),
+                    key=f"dist_{task['id']}",
+                )
+                settlement = left.text_input(
+                    "СНТ / территория",
+                    value=str(address.get("settlement", "")),
+                    key=f"set_{task['id']}",
+                )
+                street = right.text_input(
+                    "Улица",
+                    value=str(address.get("street", "")),
+                    key=f"str_{task['id']}",
+                )
+
+            save_col, cancel_col = st.columns(2)
+            if save_col.button(
+                "Сохранить исправление",
+                type="primary",
+                use_container_width=True,
+                disabled=not bool(selected_res),
+            ):
+                _submit(
+                    task,
+                    reviewer,
+                    is_admin,
+                    {
+                        "decision_type": "selected_other",
+                        "selected_res": [selected_res],
+                        "locality": locality,
+                        "district": district,
+                        "settlement": settlement,
+                        "street": street,
+                    },
+                    "Исправление сохранено. Открыто следующее задание.",
+                )
+            if cancel_col.button("Отмена", use_container_width=True):
+                st.session_state.pop(_edit_key(int(task["id"])), None)
+                st.rerun()
+
+    footer_left, footer_right = st.columns([4, 1])
+    if footer_left.button("Ошибка источника", use_container_width=True):
+        _submit(
+            task,
+            reviewer,
+            is_admin,
+            {"decision_type": "source_error", "selected_res": []},
+            "Ошибка источника отмечена. Открыто следующее задание.",
+        )
+    if footer_right.button("Пропустить", use_container_width=True):
         release_review_task(
             int(task["id"]),
             reviewer,
@@ -159,3 +217,8 @@ def page_review(is_admin: bool, reviewer: str) -> None:
         skipped.add(int(task["id"]))
         st.session_state[skip_key] = sorted(skipped)
         st.rerun()
+
+    if is_admin:
+        with st.expander("Сведения"):
+            st.write(f"Задание №{task['id']}")
+            st.write(f"Тип: {task.get('task_type', '')}")
