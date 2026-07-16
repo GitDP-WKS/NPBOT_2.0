@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from .db import get_engine, initialize_database, utcnow
 from .normalize import normalize_text
 from .pit_schema import review_task_leases
-from .schema import review_tasks
+from .schema import review_tasks, review_votes
 
 DEFAULT_LEASE_MINUTES = 15
 
@@ -39,12 +39,14 @@ def _cleanup(conn, now) -> None:
 def claim_review_task(
     reviewer: str,
     *,
+    lease_owner: str | None = None,
     lease_minutes: int = DEFAULT_LEASE_MINUTES,
     exclude_ids: set[int] | None = None,
 ) -> dict[str, Any] | None:
-    """Выдает проверяющему одно задание, недоступное другим до освобождения."""
+    """Выдает одно открытое задание только одному активному сеансу."""
     reviewer_key = normalize_text(reviewer)
-    if not reviewer_key:
+    owner_key = normalize_text(lease_owner or reviewer)
+    if not reviewer_key or not owner_key:
         raise ValueError("Укажите имя проверяющего.")
     initialize_database()
     engine = get_engine()
@@ -54,6 +56,15 @@ def claim_review_task(
 
     with engine.begin() as conn:
         _cleanup(conn, now)
+
+        reviewed_tasks = select(review_votes.c.task_id).where(review_votes.c.reviewer == reviewer_key)
+        conn.execute(
+            delete(review_task_leases).where(
+                review_task_leases.c.reviewer == owner_key,
+                review_task_leases.c.task_id.in_(reviewed_tasks),
+            )
+        )
+
         existing = conn.execute(
             select(review_tasks, review_task_leases.c.lease_token)
             .select_from(
@@ -63,9 +74,10 @@ def claim_review_task(
                 )
             )
             .where(
-                review_task_leases.c.reviewer == reviewer_key,
+                review_task_leases.c.reviewer == owner_key,
                 review_task_leases.c.expires_at > now,
                 review_tasks.c.status == "open",
+                review_tasks.c.id.not_in(reviewed_tasks),
             )
             .order_by(review_task_leases.c.claimed_at)
             .limit(1)
@@ -85,9 +97,19 @@ def claim_review_task(
                     review_task_leases.c.expires_at > now,
                 )
             )
+            already_reviewed = exists(
+                select(review_votes.c.task_id).where(
+                    review_votes.c.task_id == review_tasks.c.id,
+                    review_votes.c.reviewer == reviewer_key,
+                )
+            )
             query = (
                 select(review_tasks)
-                .where(review_tasks.c.status == "open", ~active_lease)
+                .where(
+                    review_tasks.c.status == "open",
+                    ~active_lease,
+                    ~already_reviewed,
+                )
                 .order_by(
                     review_tasks.c.priority.desc(),
                     review_tasks.c.created_at,
@@ -109,7 +131,7 @@ def claim_review_task(
                     conn.execute(
                         review_task_leases.insert().values(
                             task_id=task_id,
-                            reviewer=reviewer_key,
+                            reviewer=owner_key,
                             lease_token=token,
                             claimed_at=now,
                             expires_at=expires_at,
@@ -127,13 +149,13 @@ def validate_review_lease(
     reviewer: str,
     lease_token: str,
 ) -> None:
-    reviewer_key = normalize_text(reviewer)
+    owner_key = normalize_text(reviewer)
     now = utcnow()
     with get_engine().connect() as conn:
         row = conn.execute(
             select(review_task_leases.c.task_id).where(
                 review_task_leases.c.task_id == task_id,
-                review_task_leases.c.reviewer == reviewer_key,
+                review_task_leases.c.reviewer == owner_key,
                 review_task_leases.c.lease_token == lease_token,
                 review_task_leases.c.expires_at > now,
             )
@@ -147,12 +169,12 @@ def release_review_task(
     reviewer: str,
     lease_token: str,
 ) -> bool:
-    reviewer_key = normalize_text(reviewer)
+    owner_key = normalize_text(reviewer)
     with get_engine().begin() as conn:
         result = conn.execute(
             delete(review_task_leases).where(
                 review_task_leases.c.task_id == task_id,
-                review_task_leases.c.reviewer == reviewer_key,
+                review_task_leases.c.reviewer == owner_key,
                 review_task_leases.c.lease_token == lease_token,
             )
         )
