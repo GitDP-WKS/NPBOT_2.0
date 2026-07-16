@@ -16,6 +16,10 @@ def _skip_key(reviewer: str) -> str:
     return f"review_skipped::{reviewer.strip().lower()}"
 
 
+def _task_key(reviewer: str) -> str:
+    return f"review_task::{reviewer.strip().lower()}"
+
+
 def _lease_owner(reviewer: str) -> str:
     if "review_session_id" not in st.session_state:
         st.session_state["review_session_id"] = uuid4().hex
@@ -26,6 +30,10 @@ def _option_label(item: dict[str, str]) -> str:
     branch = short_executor_name(item.get("branch", "").strip())
     res = short_executor_name(item.get("res", "").strip())
     return f"{res} — {branch}" if branch else res
+
+
+def _clear_task(reviewer: str) -> None:
+    st.session_state.pop(_task_key(reviewer), None)
 
 
 def _submit(
@@ -49,7 +57,8 @@ def _submit(
         message = str(exc)
         if "уже проверяли" in message.lower() or "уже закрыто" in message.lower():
             release_review_task(int(task["id"]), lease_owner, str(task["lease_token"]))
-            st.session_state["flash"] = "Задание уже обработано. Показываю следующее."
+            _clear_task(reviewer)
+            st.session_state["flash"] = "Задание уже обработано."
             st.rerun()
         st.error(message)
         return
@@ -57,8 +66,15 @@ def _submit(
         st.error(str(exc))
         return
     st.session_state.pop(f"review_edit::{task['id']}", None)
+    _clear_task(reviewer)
     st.session_state["flash"] = "Решение принято."
     st.rerun()
+
+
+def _load_task(reviewer: str, owner: str, skipped: set[int]) -> dict | None:
+    task = claim_review_task(reviewer, lease_owner=owner, exclude_ids=skipped)
+    st.session_state[_task_key(reviewer)] = task
+    return task
 
 
 def page_review(is_admin: bool, reviewer: str) -> None:
@@ -71,20 +87,25 @@ def page_review(is_admin: bool, reviewer: str) -> None:
     skip_key = _skip_key(reviewer)
     skipped = set(st.session_state.get(skip_key, []))
     owner = _lease_owner(reviewer)
-    try:
-        task = claim_review_task(reviewer, lease_owner=owner, exclude_ids=skipped)
-    except Exception as exc:
-        st.error(str(exc))
-        return
+    task_key = _task_key(reviewer)
+    task = st.session_state.get(task_key)
 
-    if not task:
-        if skipped:
-            st.success("Других заданий сейчас нет.")
-            if st.button("Вернуть пропущенные", use_container_width=True):
-                st.session_state[skip_key] = []
-                st.rerun()
-        else:
-            st.success("Заданий нет.")
+    if task is None:
+        if st.button("Получить задание", type="primary", use_container_width=True):
+            try:
+                with st.spinner("Получаю задание..."):
+                    task = _load_task(reviewer, owner, skipped)
+            except Exception as exc:
+                st.error(str(exc))
+                return
+            if task is None:
+                st.success("Заданий нет.")
+                return
+            st.rerun()
+        if skipped and st.button("Вернуть пропущенные", use_container_width=True):
+            st.session_state[skip_key] = []
+            st.rerun()
+        st.caption("Переходы по разделам не обращаются к базе. Запрос выполняется только по этой кнопке.")
         return
 
     payload = dict(task.get("payload") or {})
@@ -229,4 +250,5 @@ def page_review(is_admin: bool, reviewer: str) -> None:
         release_review_task(int(task["id"]), owner, str(task["lease_token"]))
         skipped.add(int(task["id"]))
         st.session_state[skip_key] = sorted(skipped)
+        _clear_task(reviewer)
         st.rerun()
