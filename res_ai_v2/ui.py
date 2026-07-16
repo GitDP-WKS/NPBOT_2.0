@@ -58,26 +58,42 @@ def runtime_status() -> dict[str, Any]:
     return dict(_RUNTIME_STATE)
 
 
-def _render_runtime_wait(page: str, status: dict[str, Any]) -> None:
-    """Отрисовывает выбранный раздел без блокировки ожиданием Neon."""
-    if page == "Загрузка":
-        page_upload()
-        return
-    if page == "Определение":
-        page_predict()
-        return
+def _page_title(page: str) -> str:
+    return {
+        "Главная": "Главная",
+        "Проверка": "Проверка",
+        "Определение": "Определение филиала и РЭС",
+        "Загрузка": "Загрузка",
+        "База знаний": "База знаний",
+        "Анализ и обучение": "Анализ и обучение",
+        "Качество": "Качество",
+        "Центр управления": "Центр управления",
+        "Журнал": "Журнал",
+        "Настройки": "Настройки",
+    }[page]
 
-    st.header(page)
+
+def _render_runtime_state(page: str, status: dict[str, Any]) -> None:
+    """Показывает состояние запуска внутри реально выбранного раздела."""
+    st.header(_page_title(page))
     if status["error"]:
         st.error("Не удалось подключить единую базу Neon.")
         st.code(status["error"])
-        if st.button("Повторить подключение", use_container_width=True):
+        if st.button("Повторить подключение", use_container_width=True, key=f"retry_{page}"):
+            _RUNTIME_STATE["error"] = ""
             _start_runtime_async()
             st.rerun()
-    else:
-        st.info("Система запускается. Раздел уже выбран и откроется после подключения базы.")
-        if st.button("Обновить состояние", use_container_width=True):
+        return
+
+    st.info("Подключаю базу данных. Раздел откроется автоматически.")
+
+    @st.fragment(run_every=1.0)
+    def _watch_runtime() -> None:
+        current = runtime_status()
+        if current["ready"] or current["error"]:
             st.rerun()
+
+    _watch_runtime()
 
 
 def main() -> None:
@@ -113,7 +129,7 @@ def main() -> None:
 
     status = runtime_status()
     if not status["ready"]:
-        _render_runtime_wait(page, status)
+        _render_runtime_state(page, status)
         return
 
     handlers = {
