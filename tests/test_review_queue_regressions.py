@@ -22,6 +22,7 @@ def test_claim_skips_tasks_already_reviewed_by_same_reviewer(tmp_path, monkeypat
         first_id = int(
             conn.execute(
                 insert(review_tasks).values(
+                    task_key="test:borisoglebsk",
                     task_type="address_conflict",
                     subject_type="address",
                     subject_key="borisoglebsk",
@@ -37,6 +38,7 @@ def test_claim_skips_tasks_already_reviewed_by_same_reviewer(tmp_path, monkeypat
         second_id = int(
             conn.execute(
                 insert(review_tasks).values(
+                    task_key="test:usady",
                     task_type="address_conflict",
                     subject_type="address",
                     subject_key="usady",
@@ -80,6 +82,7 @@ def test_same_subject_is_not_leased_to_two_reviewers(tmp_path, monkeypatch):
         for index in range(2):
             conn.execute(
                 insert(review_tasks).values(
+                    task_key=f"test:same:{index}",
                     task_type="address_conflict",
                     subject_type="address",
                     subject_key="same-address",
@@ -93,6 +96,7 @@ def test_same_subject_is_not_leased_to_two_reviewers(tmp_path, monkeypatch):
             )
         conn.execute(
             insert(review_tasks).values(
+                task_key="test:other",
                 task_type="address_conflict",
                 subject_type="address",
                 subject_key="other-address",
