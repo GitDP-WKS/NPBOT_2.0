@@ -43,7 +43,7 @@ def claim_review_task(
     lease_minutes: int = DEFAULT_LEASE_MINUTES,
     exclude_ids: set[int] | None = None,
 ) -> dict[str, Any] | None:
-    """Выдает одно открытое задание только одному активному сеансу."""
+    """Выдает одно уникальное открытое задание только одному активному сеансу."""
     reviewer_key = normalize_text(reviewer)
     owner_key = normalize_text(lease_owner or reviewer)
     if not reviewer_key or not owner_key:
@@ -58,14 +58,20 @@ def claim_review_task(
         _cleanup(conn, now)
 
         reviewed_tasks = select(review_votes.c.task_id).where(review_votes.c.reviewer == reviewer_key)
-        conn.execute(
-            delete(review_task_leases).where(
-                review_task_leases.c.reviewer == owner_key,
-                review_task_leases.c.task_id.in_(reviewed_tasks),
+        stale_owner_conditions = [
+            review_task_leases.c.reviewer == owner_key,
+            review_task_leases.c.task_id.in_(reviewed_tasks),
+        ]
+        conn.execute(delete(review_task_leases).where(*stale_owner_conditions))
+        if excluded:
+            conn.execute(
+                delete(review_task_leases).where(
+                    review_task_leases.c.reviewer == owner_key,
+                    review_task_leases.c.task_id.in_(excluded),
+                )
             )
-        )
 
-        existing = conn.execute(
+        existing_query = (
             select(review_tasks, review_task_leases.c.lease_token)
             .select_from(
                 review_task_leases.join(
@@ -81,7 +87,10 @@ def claim_review_task(
             )
             .order_by(review_task_leases.c.claimed_at)
             .limit(1)
-        ).first()
+        )
+        if excluded:
+            existing_query = existing_query.where(review_tasks.c.id.not_in(excluded))
+        existing = conn.execute(existing_query).first()
         if existing:
             conn.execute(
                 update(review_task_leases)
@@ -90,24 +99,35 @@ def claim_review_task(
             )
             return _task_dict(existing, str(existing.lease_token), expires_at)
 
+        leased_tasks = review_tasks.alias("leased_tasks")
+        leased_rows = review_task_leases.alias("leased_rows")
+        same_subject_leased = exists(
+            select(leased_rows.c.task_id)
+            .select_from(
+                leased_rows.join(
+                    leased_tasks,
+                    leased_rows.c.task_id == leased_tasks.c.id,
+                )
+            )
+            .where(
+                leased_rows.c.expires_at > now,
+                leased_tasks.c.subject_type == review_tasks.c.subject_type,
+                leased_tasks.c.subject_key == review_tasks.c.subject_key,
+            )
+        )
+        already_reviewed = exists(
+            select(review_votes.c.task_id).where(
+                review_votes.c.task_id == review_tasks.c.id,
+                review_votes.c.reviewer == reviewer_key,
+            )
+        )
+
         for _ in range(5):
-            active_lease = exists(
-                select(review_task_leases.c.task_id).where(
-                    review_task_leases.c.task_id == review_tasks.c.id,
-                    review_task_leases.c.expires_at > now,
-                )
-            )
-            already_reviewed = exists(
-                select(review_votes.c.task_id).where(
-                    review_votes.c.task_id == review_tasks.c.id,
-                    review_votes.c.reviewer == reviewer_key,
-                )
-            )
             query = (
                 select(review_tasks)
                 .where(
                     review_tasks.c.status == "open",
-                    ~active_lease,
+                    ~same_subject_leased,
                     ~already_reviewed,
                 )
                 .order_by(
@@ -144,11 +164,7 @@ def claim_review_task(
     return None
 
 
-def validate_review_lease(
-    task_id: int,
-    reviewer: str,
-    lease_token: str,
-) -> None:
+def validate_review_lease(task_id: int, reviewer: str, lease_token: str) -> None:
     owner_key = normalize_text(reviewer)
     now = utcnow()
     with get_engine().connect() as conn:
@@ -164,11 +180,7 @@ def validate_review_lease(
         raise ValueError("Срок задания истек или оно уже передано другому проверяющему.")
 
 
-def release_review_task(
-    task_id: int,
-    reviewer: str,
-    lease_token: str,
-) -> bool:
+def release_review_task(task_id: int, reviewer: str, lease_token: str) -> bool:
     owner_key = normalize_text(reviewer)
     with get_engine().begin() as conn:
         result = conn.execute(
