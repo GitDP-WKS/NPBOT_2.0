@@ -68,16 +68,20 @@ def submit_review_and_update_agent(
     is_admin: bool,
     lease_token: str | None = None,
     *,
+    lease_owner: str | None = None,
     wait_for_agent: bool = True,
 ) -> dict[str, Any]:
     """Сохраняет ответ как директиву; рабочую базу изменяет только агент."""
+    owner = lease_owner or reviewer
     if lease_token:
-        validate_review_lease(task_id, reviewer, lease_token)
+        validate_review_lease(task_id, owner, lease_token)
 
     normalized_selection = normalize_review_selection(selection)
     scope = _task_scope(task_id)
     result = submit_review(task_id, reviewer, normalized_selection, is_admin)
     if not result.get("applied"):
+        if lease_token:
+            release_review_task(task_id, owner, lease_token)
         return result
 
     decision_id = int(result["decision_id"])
@@ -102,7 +106,7 @@ def submit_review_and_update_agent(
         deduplication_key=f"decision:{decision_id}",
     )
     if lease_token:
-        release_review_task(task_id, reviewer, lease_token)
+        release_review_task(task_id, owner, lease_token)
 
     if wait_for_agent:
         agent = run_until_event(event_id, max_events=500, worker_id="review-inline")
