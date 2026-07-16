@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# Эти тесты защищают очередь обучения от повторной и параллельной выдачи.
+
 
 def _reset_db(db) -> None:
     db.get_engine.cache_clear()
