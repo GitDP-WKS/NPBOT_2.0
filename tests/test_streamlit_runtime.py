@@ -56,18 +56,50 @@ def test_streamlit_runtime_keeps_error_without_blocking(monkeypatch):
     _reset_runtime(ui)
 
 
-def test_upload_and_predict_open_before_database_is_ready(monkeypatch):
+def test_each_navigation_item_has_its_own_page_title():
     from res_ai_v2 import ui
 
-    opened: list[str] = []
-    monkeypatch.setattr(ui, "page_upload", lambda: opened.append("upload"))
-    monkeypatch.setattr(ui, "page_predict", lambda: opened.append("predict"))
+    expected = {
+        "Главная": "Главная",
+        "Проверка": "Проверка",
+        "Определение": "Определение филиала и РЭС",
+        "Загрузка": "Загрузка",
+        "База знаний": "База знаний",
+        "Анализ и обучение": "Анализ и обучение",
+        "Качество": "Качество",
+        "Центр управления": "Центр управления",
+        "Журнал": "Журнал",
+        "Настройки": "Настройки",
+    }
 
-    waiting = {"ready": False, "running": True, "error": ""}
-    ui._render_runtime_wait("Загрузка", waiting)
-    ui._render_runtime_wait("Определение", waiting)
+    assert {page: ui._page_title(page) for page in expected} == expected
 
-    assert opened == ["upload", "predict"]
+
+def test_runtime_wait_does_not_call_another_page_handler(monkeypatch):
+    from res_ai_v2 import ui
+
+    called: list[str] = []
+    for name in (
+        "page_home",
+        "page_review",
+        "page_predict",
+        "page_upload",
+        "page_knowledge",
+        "page_training",
+        "page_quality",
+        "page_agent_center",
+        "page_journal",
+        "page_settings",
+    ):
+        monkeypatch.setattr(ui, name, lambda *args, _name=name, **kwargs: called.append(_name))
+
+    monkeypatch.setattr(ui.st, "header", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ui.st, "info", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ui.st, "fragment", lambda **kwargs: lambda func: lambda: None)
+
+    ui._render_runtime_state("База знаний", {"ready": False, "running": True, "error": ""})
+
+    assert called == []
 
 
 def test_streamlit_common_render_path_has_no_blocking_database_calls():
