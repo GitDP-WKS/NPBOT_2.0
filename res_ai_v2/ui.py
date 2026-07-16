@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import threading
-from typing import Any
-
 import streamlit as st
 
 from .background_worker import start_background_worker
-from .db import initialize_database, storage_name
+from .db import initialize_database
 from .page_agent_admin import page_agent_center
 from .page_data_admin import page_home, page_knowledge, page_upload
 from .page_journal import page_journal
@@ -15,47 +12,42 @@ from .page_predict import page_predict
 from .page_review import page_review
 from .page_settings_admin import page_settings
 from .ui_common import admin_login, configure, style
+from .ui_runtime import reset_runtime_error, runtime_status, start_runtime_async
 
-_RUNTIME_LOCK = threading.Lock()
-_RUNTIME_THREAD: threading.Thread | None = None
-_RUNTIME_STATE: dict[str, Any] = {
-    "ready": False,
-    "running": False,
-    "error": "",
-}
+BUILD_ID = "2026.07.16.2"
+LOCAL_PAGES = {"Загрузка", "Определение"}
 
 
-def _runtime_bootstrap() -> None:
-    _RUNTIME_STATE["running"] = True
-    _RUNTIME_STATE["error"] = ""
-    try:
-        initialize_database()
-        start_background_worker()
-        _RUNTIME_STATE["ready"] = True
-    except Exception as exc:
-        _RUNTIME_STATE["error"] = str(exc)[:2000]
-    finally:
-        _RUNTIME_STATE["running"] = False
+def _initialize_runtime() -> None:
+    initialize_database()
+    start_background_worker()
 
 
-def _start_runtime_async() -> None:
-    """Запускает подготовку базы и агента без блокировки интерфейса."""
-    global _RUNTIME_THREAD
-    if _RUNTIME_STATE["ready"]:
+def _render_database_state(page: str, status: dict) -> None:
+    title = {
+        "Главная": "Главная",
+        "Проверка": "Проверка",
+        "База знаний": "База знаний",
+        "Анализ и обучение": "Анализ и обучение",
+        "Качество": "Качество",
+        "Центр управления": "Центр управления",
+        "Журнал": "Журнал",
+        "Настройки": "Настройки",
+    }.get(page, page)
+    st.header(title)
+    if status.get("error"):
+        st.error("Нет подключения к общей базе Neon.")
+        st.caption("Интерфейс продолжает работать. Проверьте DATABASE_URL в Secrets.")
+        with st.expander("Техническая причина"):
+            st.code(status["error"])
+        if st.button("Повторить подключение", use_container_width=True, key=f"retry_{page}"):
+            reset_runtime_error()
+            start_runtime_async(_initialize_runtime)
+            st.rerun()
         return
-    with _RUNTIME_LOCK:
-        if _RUNTIME_THREAD and _RUNTIME_THREAD.is_alive():
-            return
-        _RUNTIME_THREAD = threading.Thread(
-            target=_runtime_bootstrap,
-            name="res-ai-runtime-bootstrap",
-            daemon=True,
-        )
-        _RUNTIME_THREAD.start()
-
-
-def runtime_status() -> dict[str, Any]:
-    return dict(_RUNTIME_STATE)
+    st.info("Подключение к базе выполняется в фоне. Можно перейти в «Загрузка» или «Определение».")
+    if st.button("Обновить состояние", use_container_width=True, key=f"refresh_{page}"):
+        st.rerun()
 
 
 def main() -> None:
@@ -65,7 +57,8 @@ def main() -> None:
     st.title("РЭС AI")
     st.caption("Определение филиала и РЭС по Республике Татарстан")
 
-    _start_runtime_async()
+    start_runtime_async(_initialize_runtime)
+    status = runtime_status()
 
     is_admin = admin_login()
     reviewer = (
@@ -87,27 +80,28 @@ def main() -> None:
             "Журнал",
             "Настройки",
         ]
-    st.sidebar.success(f"Общая база: {storage_name()}")
-    page = st.sidebar.radio("Раздел", pages)
+    st.sidebar.caption(f"Сборка {BUILD_ID}")
+    if status.get("ready"):
+        st.sidebar.success("Общая база: PostgreSQL / Neon")
+    elif status.get("error"):
+        st.sidebar.error("Neon недоступен")
+    else:
+        st.sidebar.info("Подключение к Neon...")
+    page = st.sidebar.radio("Раздел", pages, key="main_navigation")
 
-    status = runtime_status()
-    if not status["ready"]:
-        if status["error"]:
-            st.error("Общая база данных недоступна.")
-            st.code(status["error"])
-            if st.button("Повторить подключение", use_container_width=True):
-                _start_runtime_async()
-                st.rerun()
-        else:
-            st.info("Подключаю общую базу. Меню уже доступно.")
-            if st.button("Проверить подключение", use_container_width=True):
-                st.rerun()
+    database_ready = bool(status.get("ready"))
+    if page == "Загрузка":
+        page_upload(database_ready=database_ready)
+        return
+    if page == "Определение":
+        page_predict(database_ready=database_ready)
+        return
+    if not database_ready:
+        _render_database_state(page, status)
         return
 
     handlers = {
         "Главная": page_home,
-        "Определение": page_predict,
-        "Загрузка": page_upload,
         "База знаний": page_knowledge,
         "Анализ и обучение": page_training,
         "Качество": page_quality,
