@@ -44,7 +44,7 @@ def style() -> None:
 
 def admin_login() -> bool:
     if st.session_state.get("is_admin"):
-        if st.sidebar.button("Выйти из служебного режима", use_container_width=True):
+        if st.sidebar.button("Выйти из служебного режима", width="stretch"):
             st.session_state["is_admin"] = False
             st.session_state["main_navigation"] = "Проверка"
             st.rerun()
@@ -52,7 +52,7 @@ def admin_login() -> bool:
     with st.sidebar.expander("Служебный вход"):
         with st.form("admin_login_form"):
             value = st.text_input("Пароль", type="password", label_visibility="collapsed")
-            submitted = st.form_submit_button("Войти", use_container_width=True)
+            submitted = st.form_submit_button("Войти", width="stretch")
         if submitted:
             expected = os.getenv("ADMIN_PASSWORD", "")
             if expected and value == expected:
@@ -82,7 +82,7 @@ def address_table(rows: list[dict[str, Any]]) -> pd.DataFrame:
 
 def display_options(rows: list[dict[str, Any]]) -> None:
     if rows:
-        st.dataframe(address_table(rows), use_container_width=True, hide_index=True)
+        st.dataframe(address_table(rows), width="stretch", hide_index=True)
 
 
 def flash() -> None:
