@@ -34,7 +34,7 @@ def _metrics(result) -> None:
     if per_res:
         st.dataframe(
             pd.DataFrame(per_res).sort_values("Найдено правильных случаев"),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
     if result.get("confusion"):
@@ -42,7 +42,7 @@ def _metrics(result) -> None:
         frame = pd.DataFrame(result["confusion"]).rename(
             columns={"true": "Правильный РЭС", "predicted": "Выбранный моделью РЭС", "count": "Количество ошибок"}
         )
-        st.dataframe(frame, use_container_width=True, hide_index=True)
+        st.dataframe(frame, width="stretch", hide_index=True)
 
 
 def _show_agent_failure(payload: dict) -> bool:
@@ -60,7 +60,7 @@ def page_training() -> None:
         "Рабочая модель меняется только после решения администратора."
     )
     a, b, c = st.columns(3)
-    if a.button("Проанализировать базу", use_container_width=True):
+    if a.button("Проанализировать базу", width="stretch"):
         with st.spinner("Агент проверяет базу..."):
             response = request_full_analysis()
         if not _show_agent_failure(response):
@@ -70,7 +70,7 @@ def page_training() -> None:
                 f"противоречий: {result.get('conflicts', 0)}; "
                 f"адресов без района: {result.get('missing_context', 0)}."
             )
-    if b.button("Подготовить новую модель", use_container_width=True):
+    if b.button("Подготовить новую модель", width="stretch"):
         try:
             with st.spinner("Агент обучает и проверяет кандидата..."):
                 response = request_training()
@@ -78,7 +78,7 @@ def page_training() -> None:
                 st.session_state["last_training"] = response.get("result")
         except Exception as exc:
             st.error(str(exc))
-    if c.button("Полный цикл", type="primary", use_container_width=True):
+    if c.button("Полный цикл", type="primary", width="stretch"):
         try:
             with st.spinner("Агент анализирует базу и готовит кандидата..."):
                 response = request_analysis_and_training()
@@ -105,17 +105,17 @@ def page_training() -> None:
             }
             for row in versions
         ]
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
         version = st.selectbox("Выберите версию", [row["version"] for row in versions])
         left, right = st.columns(2)
-        if left.button("Сделать выбранную версию рабочей", use_container_width=True):
+        if left.button("Сделать выбранную версию рабочей", width="stretch"):
             try:
                 publish_candidate(version)
                 st.success("Выбранная версия стала рабочей.")
                 st.rerun()
             except Exception as exc:
                 st.error(str(exc))
-        if right.button("Вернуться к выбранной версии", use_container_width=True):
+        if right.button("Вернуться к выбранной версии", width="stretch"):
             try:
                 rollback_model(version)
                 st.success("Рабочая модель переключена на выбранную версию.")
@@ -132,13 +132,13 @@ def page_quality() -> None:
         {"Статус": status_label(key), "Записей": value}
         for key, value in values["mapping_status"].items()
     ]
-    st.dataframe(pd.DataFrame(status_rows), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(status_rows), width="stretch", hide_index=True)
     st.subheader("Открытые задания")
     task_rows = [
         {"Тип": task_type_label(key), "Заданий": value}
         for key, value in values["open_by_type"].items()
     ]
-    st.dataframe(pd.DataFrame(task_rows), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(task_rows), width="stretch", hide_index=True)
     cols = st.columns(3)
     cols[0].metric("Загруженных файлов", values["file_count"])
     cols[1].metric("Размеченных текстов", values["text_count"])
