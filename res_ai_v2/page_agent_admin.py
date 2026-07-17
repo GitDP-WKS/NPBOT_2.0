@@ -60,22 +60,22 @@ def page_agent_center() -> None:
         )
 
     left, middle, right = st.columns(3)
-    if left.button("Полный самоанализ", type="primary", use_container_width=True):
+    if left.button("Полный самоанализ", type="primary", width="stretch"):
         request_full_analysis(wait_for_agent=False)
         st.success("Самоанализ поставлен в очередь.")
         st.rerun()
-    if middle.button("Восстановить зависшие", use_container_width=True):
+    if middle.button("Восстановить зависшие", width="stretch"):
         recovered = recover_stale_events()
         st.success(f"Возвращено в очередь: {recovered}.")
         st.rerun()
-    if right.button("Обновить", use_container_width=True):
+    if right.button("Обновить", width="stretch"):
         st.rerun()
 
     events, runs = st.tabs(["События", "Запуски"])
     with events:
         rows = recent_agent_events(limit=100)
         if rows:
-            st.dataframe(_event_table(rows), use_container_width=True, hide_index=True)
+            st.dataframe(_event_table(rows), width="stretch", hide_index=True)
         else:
             st.info("Событий нет.")
     with runs:
@@ -93,6 +93,6 @@ def page_agent_center() -> None:
                     for row in rows
                 ]
             )
-            st.dataframe(frame, use_container_width=True, hide_index=True)
+            st.dataframe(frame, width="stretch", hide_index=True)
         else:
             st.info("Запусков нет.")
