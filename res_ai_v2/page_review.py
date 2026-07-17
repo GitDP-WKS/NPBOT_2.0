@@ -91,7 +91,7 @@ def page_review(is_admin: bool, reviewer: str) -> None:
     task = st.session_state.get(task_key)
 
     if task is None:
-        if st.button("Получить задание", type="primary", use_container_width=True):
+        if st.button("Получить задание", type="primary", width="stretch"):
             try:
                 with st.spinner("Получаю задание..."):
                     task = _load_task(reviewer, owner, skipped)
@@ -102,7 +102,7 @@ def page_review(is_admin: bool, reviewer: str) -> None:
                 st.success("Заданий нет.")
                 return
             st.rerun()
-        if skipped and st.button("Вернуть пропущенные", use_container_width=True):
+        if skipped and st.button("Вернуть пропущенные", width="stretch"):
             st.session_state[skip_key] = []
             st.rerun()
         st.caption("Переходы по разделам не обращаются к базе. Запрос выполняется только по этой кнопке.")
@@ -139,7 +139,7 @@ def page_review(is_admin: bool, reviewer: str) -> None:
     if confirm.button(
         "Подтвердить",
         type="primary",
-        use_container_width=True,
+        width="stretch",
         disabled=not bool(proposed_res),
     ):
         _submit(
@@ -158,11 +158,11 @@ def page_review(is_admin: bool, reviewer: str) -> None:
         )
 
     edit_key = f"review_edit::{task['id']}"
-    if correct.button("Исправить", use_container_width=True):
+    if correct.button("Исправить", width="stretch"):
         st.session_state[edit_key] = not bool(st.session_state.get(edit_key))
         st.rerun()
 
-    if insufficient.button("Недостаточно данных", use_container_width=True):
+    if insufficient.button("Недостаточно данных", width="stretch"):
         _submit(
             task,
             reviewer,
@@ -222,7 +222,7 @@ def page_review(is_admin: bool, reviewer: str) -> None:
         if save.button(
             "Сохранить исправление",
             type="primary",
-            use_container_width=True,
+            width="stretch",
             disabled=not bool(selected),
         ):
             _submit(
@@ -239,14 +239,14 @@ def page_review(is_admin: bool, reviewer: str) -> None:
                 },
                 is_admin,
             )
-        if cancel.button("Отмена", use_container_width=True):
+        if cancel.button("Отмена", width="stretch"):
             st.session_state[edit_key] = False
             st.rerun()
 
     footer_left, footer_right = st.columns([4, 1])
     if is_admin:
         footer_left.caption(f"Задание №{task['id']} · {task.get('task_type', '')}")
-    if footer_right.button("Пропустить", use_container_width=True):
+    if footer_right.button("Пропустить", width="stretch"):
         release_review_task(int(task["id"]), owner, str(task["lease_token"]))
         skipped.add(int(task["id"]))
         st.session_state[skip_key] = sorted(skipped)
