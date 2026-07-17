@@ -29,13 +29,13 @@ def _render_database_state(page: str, status: dict) -> None:
         st.caption("Интерфейс продолжает работать. Проверьте DATABASE_URL в Secrets.")
         with st.expander("Техническая причина"):
             st.code(status["error"])
-        if st.button("Повторить подключение", use_container_width=True, key=f"retry_{page}"):
+        if st.button("Повторить подключение", width="stretch", key=f"retry_{page}"):
             reset_runtime_error()
             start_runtime_async(_initialize_runtime)
             st.rerun()
         return
     st.info("Подключение к базе выполняется в фоне. Можно перейти в «Загрузка» или «Определение».")
-    if st.button("Обновить состояние", use_container_width=True, key=f"refresh_{page}"):
+    if st.button("Обновить состояние", width="stretch", key=f"refresh_{page}"):
         st.rerun()
 
 

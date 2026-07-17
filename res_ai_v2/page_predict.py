@@ -20,7 +20,7 @@ def page_predict(*, database_ready: bool = True) -> None:
         height=140,
         placeholder="Например: Лаишевский район, село Усады, нет электричества",
     )
-    if not st.button("Определить", type="primary", use_container_width=True):
+    if not st.button("Определить", type="primary", width="stretch"):
         return
     if not database_ready:
         st.warning("База данных еще подключается. Повторите определение через несколько секунд.")

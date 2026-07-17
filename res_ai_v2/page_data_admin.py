@@ -74,9 +74,9 @@ def page_upload(*, database_ready: bool = True) -> None:
                 }
                 for source, target in sheet.columns.items()
             ]
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-    st.dataframe(_preview(plan), use_container_width=True, hide_index=True)
-    if not st.button("Загрузить", type="primary", use_container_width=True):
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+    st.dataframe(_preview(plan), width="stretch", hide_index=True)
+    if not st.button("Загрузить", type="primary", width="stretch"):
         return
     if not database_ready:
         st.warning("База данных еще подключается. Файл не потерян — повторите отправку через несколько секунд.")
@@ -138,4 +138,4 @@ def page_knowledge() -> None:
         frame = frame[list(rename.values())]
     else:
         frame = pd.DataFrame(columns=list(rename.values()))
-    st.dataframe(frame, use_container_width=True, hide_index=True)
+    st.dataframe(frame, width="stretch", hide_index=True)
