@@ -23,7 +23,7 @@ def page_journal() -> None:
     st.header("Журнал")
     top_left, top_right = st.columns([3, 1])
     top_left.caption("Данные читаются из общей базы Neon. Здесь видны действия со всех компьютеров.")
-    if top_right.button("Обновить данные", use_container_width=True):
+    if top_right.button("Обновить данные", width="stretch"):
         st.rerun()
 
     tab1, tab2, tab3 = st.tabs(["Голоса проверяющих", "Принятые решения", "Все действия"])
@@ -52,7 +52,7 @@ def page_journal() -> None:
             visible = [column for column in rename if column in frame.columns]
             st.dataframe(
                 frame[visible].rename(columns=rename),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
 
@@ -78,7 +78,7 @@ def page_journal() -> None:
             visible = [column for column in rename if column in frame.columns]
             st.dataframe(
                 frame[visible].rename(columns=rename),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
             active = [row for row in decisions if row.get("active")]
@@ -115,4 +115,4 @@ def page_journal() -> None:
             if "Объект" in frame:
                 frame["Объект"] = frame["Объект"].map(entity_label)
             visible = [column for column in rename.values() if column in frame.columns]
-            st.dataframe(frame[visible], use_container_width=True, hide_index=True)
+            st.dataframe(frame[visible], width="stretch", hide_index=True)
