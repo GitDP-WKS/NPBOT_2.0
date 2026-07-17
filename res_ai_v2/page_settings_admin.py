@@ -14,5 +14,5 @@ def page_settings() -> None:
         snapshot,
         "res_ai_full_backup.json",
         "application/json",
-        use_container_width=True,
+        width="stretch",
     )
